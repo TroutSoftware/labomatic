@@ -4,9 +4,9 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"os/signal"
 	"path/filepath"
 	"runtime"
-	"time"
 
 	"github.com/vishvananda/netlink"
 	"github.com/vishvananda/netns"
@@ -26,6 +26,21 @@ func Build(nodes starlark.StringDict) error {
 	}
 
 	fmt.Println("\033[38;5;2mBuilding the Lab\033[0m")
+
+	{
+		lk, err := parent.LinkByName("lo")
+		if err != nil {
+			return fmt.Errorf("no local interface in netns: %w", err)
+		}
+		addr, _ := netlink.ParseAddr("127.0.0.1/8")
+		if err := parent.AddrAdd(lk, addr); err != nil {
+			return fmt.Errorf("cannot set loopback interface: %w", err)
+		}
+
+		if err := netlink.LinkSetUp(lk); err != nil {
+			return fmt.Errorf("cannot start lo: %w", err)
+		}
+	}
 
 	// first pass: the bridges
 	for _, node := range nodes {
@@ -49,7 +64,7 @@ func Build(nodes starlark.StringDict) error {
 	fmt.Println("\033[38;5;2m- Nets are up and running!\033[0m")
 
 	// second pass: the taps
-	for _, node := range nodes {
+	for sname, node := range nodes {
 		switch node := node.(type) {
 		case *netnode:
 			taps := make(map[string]*os.File)
@@ -78,32 +93,52 @@ func Build(nodes starlark.StringDict) error {
 			}
 
 			// note this run in the same LockOSThread so that network namespace is kept
-			if err := RunVM(node, taps); err != nil {
+			if err := RunVM(sname, node, taps); err != nil {
 				return fmt.Errorf("cannot create vm %s: %w", node.name, err)
 			}
 		}
-
+	}
+	<-KillChan
+	for _, p := range VMS {
+		p.Process.Kill()
 	}
 
-	time.Sleep(100 * time.Second)
-	return nil
+	return netns.DeleteNamed("lab")
 }
 
 var (
-	UbuntuImage = "/home/romain/Téléchargements/ubuntu.qcow"
+	UbuntuImage   = "/var/lib/labomatic/ubuntu-22.04.qcow"
+	MikrotikImage = "/var/lib/labomatic/chr-7.14.qcow"
 
 	TmpDir string
+
+	VMS      []*exec.Cmd
+	KillChan = make(chan os.Signal)
+
+	TelNum = 4321 // gross
 )
 
 func init() {
 	TmpDir, _ = os.MkdirTemp("", "labomatic_")
+
+	signal.Notify(KillChan, os.Interrupt)
 }
 
-func RunVM(node *netnode, taps map[string]*os.File) error {
-	vst := filepath.Join(TmpDir, node.name+".qcow2")
+func RunVM(vname string, node *netnode, taps map[string]*os.File) error {
+	var base string
+	switch node.typ {
+	default:
+		panic("unknown node type")
+	case nodeRouter:
+		base = MikrotikImage
+	case nodeHost:
+		base = UbuntuImage
+	}
+
+	vst := filepath.Join(TmpDir, vname+".qcow2")
 	err := exec.Command("/usr/bin/qemu-img", "create",
 		"-f", "qcow2", "-F", "qcow2",
-		"-b", UbuntuImage,
+		"-b", base,
 		vst).Run()
 	if err != nil {
 		return fmt.Errorf("creating disk: %w", err)
@@ -115,12 +150,16 @@ func RunVM(node *netnode, taps map[string]*os.File) error {
 		"-cpu", "host",
 		"-m", "2G",
 		"-nographic",
+		"-monitor", "none",
+		"-chardev", fmt.Sprintf("socket,id=ga0,path=/tmp/%s,server=on,wait=off", vname),
+		"-serial", fmt.Sprintf("telnet:127.0.0.1:%d,server", TelNum),
 		"-drive", fmt.Sprintf("if=virtio,format=qcow2,file=%s", vst),
 	}
+	TelNum++
 	const fdtap = 3 // since stderr / stdout / stdin are passed
-	for _, iface := range node.ifcs {
+	for i, iface := range node.ifcs {
 		args = append(args,
-			"-nic", fmt.Sprintf("tap,id=%s,fd=%d,model=virtio", iface.name, fdtap),
+			"-nic", fmt.Sprintf("tap,id=%s,fd=%d,model=virtio", iface.name, fdtap+i),
 		)
 	}
 	cm := exec.Command("/usr/bin/qemu-system-x86_64", args...)
@@ -130,6 +169,8 @@ func RunVM(node *netnode, taps map[string]*os.File) error {
 	for _, iface := range node.ifcs {
 		cm.ExtraFiles = append(cm.ExtraFiles, taps[iface.name])
 	}
+
+	VMS = append(VMS, cm)
 
 	return cm.Start()
 }
