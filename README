@@ -1,0 +1,12 @@
+# Lab-O-Matic: A Language Description for Labs
+
+labomatic is a tool to configure and run a lab.
+It aims to provide a singular point in the lab creation space:
+ - use configuration-as-code (versioning, …)
+ - the network structure is described using Python (Starlark)
+ - all systems are image-based, with a new well-known images
+ - we only aim to emulate SME-level infrastructure
+ - QEMU + netlink
+ - minimalist
+
+Other tools (netlab, containerlab, …) will make different choices.

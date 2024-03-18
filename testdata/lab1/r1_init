@@ -1,0 +1,4 @@
+/ip/address
+{{ for iface := range .Interfaces }}
+add interface={{iface.Name}} addr={{iface.Address}} network={{iface.Network.Addr}}/{{iface.Network.Bits}}
+{{ end }}
