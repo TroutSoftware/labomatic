@@ -15,11 +15,13 @@ func NewSubnet(th *starlark.Thread, fn *starlark.Builtin, args starlark.Tuple, k
 		name    string
 		tag     int
 		network string
+		host    bool
 	)
 	if err := starlark.UnpackArgs("Host", args, kwargs,
 		"name?", &name,
 		"tag?", &tag,
-		"network?", &network); err != nil {
+		"network?", &network,
+		"host?", &host); err != nil {
 		return starlark.None, fmt.Errorf("invalid constructor argument: %w", err)
 	}
 
@@ -37,6 +39,7 @@ func NewSubnet(th *starlark.Thread, fn *starlark.Builtin, args starlark.Tuple, k
 		name:    name,
 		tag:     tag,
 		network: sub,
+		host:    host,
 	}, nil
 }
 
@@ -44,6 +47,7 @@ type subnet struct {
 	name    string
 	frozen  bool
 	tag     int
+	host    bool
 	network netip.Prefix
 	mbs     []*netiface
 }
@@ -60,6 +64,7 @@ func (r subnet) Len() int                   { return len(r.mbs) }
 func (subnet) AttrNames() []string {
 	return []string{
 		"addr",
+		"host",
 	}
 }
 
@@ -67,6 +72,8 @@ func (r *subnet) Attr(name string) (starlark.Value, error) {
 	switch name {
 	case "addr":
 		return getaddr.BindReceiver(r), nil
+	case "host":
+		return starlark.Bool(r.host), nil
 	}
 
 	return nil, nil

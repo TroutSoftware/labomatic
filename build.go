@@ -13,9 +13,19 @@ import (
 	"go.starlark.net/starlark"
 )
 
+// TODO multi-labs:
+//  - set unique ns
+//  - persistence with names
+
 func Build(nodes starlark.StringDict) error {
 	runtime.LockOSThread()
 	defer runtime.UnlockOSThread()
+
+	origns, err := netns.Get()
+	if err != nil {
+		return fmt.Errorf("cannot get handle to existing namespace: %w", err)
+	}
+
 	ns, err := netns.NewNamed("lab")
 	if err != nil {
 		return fmt.Errorf("cannot create namespace: %w", err)
@@ -52,16 +62,53 @@ func Build(nodes starlark.StringDict) error {
 					TxQLen: -1,
 				},
 			}
-			if err := parent.LinkAdd(br); err != nil {
-				return fmt.Errorf("cannot create bridge %s: %w", net.name, err)
+			if err := addup(parent, br); err != nil {
+				return fmt.Errorf("creating bridge: %w", err)
 			}
-			if err := parent.LinkSetUp(br); err != nil {
-				return fmt.Errorf("cannot start the bridge %s: %w", net.name, err)
+			if net.host {
+				veth := &netlink.Veth{
+					LinkAttrs: netlink.LinkAttrs{
+						NetNsID:     1,
+						Name:        "veth_" + net.name,
+						TxQLen:      -1,
+						MasterIndex: br.Attrs().Index,
+					},
+					PeerName: "lab_" + net.name,
+				}
+				if err := addveth(parent, origns, veth); err != nil {
+					return fmt.Errorf("cannot create host handle: %w", err)
+				}
+
 			}
 		}
 	}
 
-	fmt.Println("\033[38;5;2m- Nets are up and running!\033[0m")
+	fmt.Println("\033[38;5;2m- Internal networks are up and running!\033[0m")
+
+	// second pass: virtual connectors outside
+	{
+		veth := &netlink.Veth{
+			LinkAttrs: netlink.LinkAttrs{
+				NetNsID: 1,
+				Name:    "telnet",
+				TxQLen:  -1,
+			},
+			PeerName: "admin",
+		}
+		if err := addveth(parent, origns, veth, func(peer netlink.Link) error {
+			addr, _ := netlink.ParseAddr("169.254.169.1/30")
+			return netlink.AddrAdd(peer, addr)
+		}); err != nil {
+			return fmt.Errorf("cannot create host handle: %w", err)
+		}
+
+		addr, _ := netlink.ParseAddr("169.254.169.2/30")
+		if err := netlink.AddrAdd(veth, addr); err != nil {
+			return fmt.Errorf("creating admin handle: %w", err)
+		}
+
+	}
+	fmt.Println("\033[38;5;2m- Serial over Telnet available\033[0m")
 
 	// second pass: the taps
 	for sname, node := range nodes {
@@ -83,11 +130,8 @@ func Build(nodes starlark.StringDict) error {
 					Mode:   netlink.TUNTAP_MODE_TAP,
 					Queues: 1,
 				}
-				if err = parent.LinkAdd(tt); err != nil {
-					return fmt.Errorf("cannot create tap device %s: %w", ifname, err)
-				}
-				if err := parent.LinkSetUp(tt); err != nil {
-					return fmt.Errorf("cannot start the bridge %s: %w", ifname, err)
+				if err := addup(parent, tt); err != nil {
+					return fmt.Errorf("creating tap device %w", err)
 				}
 				taps[iface.name] = tt.Fds[0] // one queue
 			}
@@ -98,6 +142,8 @@ func Build(nodes starlark.StringDict) error {
 			}
 		}
 	}
+
+	fmt.Println("\033[38;5;2m- Virtual machines are up and running!\033[0m")
 	<-KillChan
 	for _, p := range VMS {
 		p.Process.Kill()
@@ -106,16 +152,67 @@ func Build(nodes starlark.StringDict) error {
 	return netns.DeleteNamed("lab")
 }
 
+// add and set up
+func addup(parent *netlink.Handle, lk netlink.Link) error {
+	if err := parent.LinkAdd(lk); err != nil {
+		return fmt.Errorf("cannot create device %s: %w", lk.Attrs().Name, err)
+	}
+	if err := parent.LinkSetUp(lk); err != nil {
+		return fmt.Errorf("cannot start interface %s: %w", lk.Attrs().Name, err)
+	}
+	return nil
+}
+
+// addveth sets up a veth device in ns1, with lk.Peer in ns2.
+// configurations applied to the link after it gets moved to the new namespace.
+func addveth(ns1 *netlink.Handle, ns2 netns.NsHandle, lk *netlink.Veth, cfg ...func(netlink.Link) error) error {
+	if err := addup(ns1, lk); err != nil {
+		return fmt.Errorf("creating host handle: %w", err)
+	}
+	peer, err := netlink.LinkByName(lk.PeerName)
+	if err != nil {
+		return fmt.Errorf("creating host handle: cannot find peer: %w", err)
+	}
+
+	if err := netlink.LinkSetNsFd(peer, int(ns2)); err != nil {
+		return fmt.Errorf("cannot port host handle: %w", err)
+	}
+	ch, err := netns.Get()
+	if err != nil {
+		return fmt.Errorf("cannot get current handle")
+	}
+
+	if err := netns.Set(ns2); err != nil {
+		return fmt.Errorf("cannot switch to host handle: %w", err)
+	}
+	peer, err = netlink.LinkByName(lk.PeerName)
+	if err != nil {
+		return fmt.Errorf("cannot find peer after port: %w", err)
+	}
+
+	if err := netlink.LinkSetUp(peer); err != nil {
+		return fmt.Errorf("creating admin handle: %w", err)
+	}
+	for _, cfg := range cfg {
+		if err := cfg(peer); err != nil {
+			return fmt.Errorf("configuring peer handle: %w", err)
+		}
+	}
+
+	return netns.Set(ch)
+}
+
 var (
 	UbuntuImage   = "/var/lib/labomatic/ubuntu-22.04.qcow"
 	MikrotikImage = "/var/lib/labomatic/chr-7.14.qcow"
 
 	TmpDir string
 
+	// global variables, the script is not persistent…
 	VMS      []*exec.Cmd
 	KillChan = make(chan os.Signal)
 
-	TelNum = 4321 // gross
+	TelnetNum = 23 // standard telnet
 )
 
 func init() {
@@ -152,10 +249,10 @@ func RunVM(vname string, node *netnode, taps map[string]*os.File) error {
 		"-nographic",
 		"-monitor", "none",
 		"-chardev", fmt.Sprintf("socket,id=ga0,path=/tmp/%s,server=on,wait=off", vname),
-		"-serial", fmt.Sprintf("telnet:127.0.0.1:%d,server", TelNum),
+		"-serial", fmt.Sprintf("telnet:169.254.169.2:%d,server", TelnetNum),
 		"-drive", fmt.Sprintf("if=virtio,format=qcow2,file=%s", vst),
 	}
-	TelNum++
+	TelnetNum++
 	const fdtap = 3 // since stderr / stdout / stdin are passed
 	for i, iface := range node.ifcs {
 		args = append(args,

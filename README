@@ -10,3 +10,39 @@ It aims to provide a singular point in the lab creation space:
  - minimalist
 
 Other tools (netlab, containerlab, …) will make different choices.
+
+## First install (Ubuntu)
+
+NOTE: all those steps are meant to be automated too.
+
+The Ubuntu image from upstream needs to be configured to accept authentication.
+
+https://cloud-images.ubuntu.com/minimal/releases/jammy/release/ubuntu-22.04-minimal-cloudimg-amd64.img
+
+2. Generate the seed image
+
+cloud-localds seed.img user-data.yaml metadata.yaml
+
+3. Run the VM
+
+sudo qemu-system-x86_64  \
+  -machine accel=kvm,type=q35 \
+  -cpu host \
+  -m 2G \
+  -nographic \
+  -device virtio-net-pci,netdev=net0 \
+  -netdev user,id=net0,hostfwd=tcp::2222-:22 \
+  -drive if=virtio,format=qcow2,file=/home/romain/Téléchargements/ubuntu-server.qcow \
+  -drive if=virtio,format=raw,file=seed.img
+
+user-data.yaml
+ #cloud-config
+ ssh_authorized_keys:
+   - "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIE45Vai+zEse3sdy17Jfih6Yb+kWB3Kw7LqlNs/5k5oN romain@tolkien"
+ password: "$1$thesault$nWDYzinFoHb2XX3vVy2St/"
+ chpasswd: { expire: False }
+ ssh_pwauth: True 
+
+metadata.yaml
+instance-id: iid-local01
+local-hostname: ubuntu-l1
