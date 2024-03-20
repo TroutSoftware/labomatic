@@ -48,3 +48,12 @@ user-data.yaml
 metadata.yaml
 instance-id: iid-local01
 local-hostname: ubuntu-l1
+
+## First install (Mikrotik)
+
+sudo qemu-system-x86_64  \
+  -machine accel=kvm,type=q35 \
+  -cpu host \
+  -m 2G \
+  -nographic \
+  -drive if=virtio,format=qcow2,file=/var/lib/labomatic/chr-7.14.qcow

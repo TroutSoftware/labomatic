@@ -102,8 +102,6 @@ func (netnode) Type() string         { return "netnode" }
 
 func (r *netnode) Attr(name string) (starlark.Value, error) {
 	switch name {
-	case "init_script":
-		return starlark.String(r.init), nil
 	case "attach_nic":
 		return attach_iface.BindReceiver(r), nil
 	}
@@ -121,7 +119,6 @@ func (r netnode) AttrNames() (attrs []string) {
 	}
 
 	return append(attrs,
-		"init_script",
 		"name",
 	)
 }
@@ -133,28 +130,23 @@ var attach_iface = starlark.NewBuiltin("attach_nic", func(thread *starlark.Threa
 	}
 
 	var (
-		net    *subnet
-		ifname string
-		addr   Addr
+		net  *subnet
+		addr Addr
 	)
 
 	if err := starlark.UnpackArgs("attach_nic", args, kwargs,
 		"net", &net,
-		"name?", &ifname,
 		"addr?", &addr,
 	); err != nil {
 		return starlark.None, err
 	}
 
-	if ifname == "" {
-		var max int
-		for _, ifc := range nd.ifcs {
-			if pn, ok := parseEther(ifc.name); ok {
-				max = pn
-			}
-			max++
-		}
-		ifname = fmt.Sprintf("ether%d", max)
+	var ifname string
+	switch nd.typ {
+	case nodeRouter:
+		ifname = fmt.Sprintf("ether%d", len(nd.ifcs)+1)
+	case nodeHost:
+		ifname = fmt.Sprintf("enp0s%d", len(nd.ifcs)+2)
 	}
 
 	ifc := &netiface{name: ifname, host: nd, net: net, addr: addr}
@@ -180,8 +172,6 @@ func (r *netnode) SetField(name string, val starlark.Value) error {
 	switch name {
 	default:
 		return starlark.NoSuchAttrError(name)
-	case "init_script":
-		r.init = val.String() // TODO check if that’s correct??
 	case "name":
 		r.name = val.String()
 	}

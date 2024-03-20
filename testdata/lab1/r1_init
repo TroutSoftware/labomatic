@@ -1,4 +1,1 @@
-/ip/address/add address=192.168.0.1/24 interface=ether1 
-/ip/pool/add range=192.168.0.10-192.168.0.100               
-/ip/dhcp-server/network/add address=192.168.0.0/24 gateway=192.168.0.1 dns-server=192.168.0.1
-/ip/dhcp-server/add interface=ether1 address-pool=pool0
+/interface/print

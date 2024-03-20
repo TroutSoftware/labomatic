@@ -1,6 +1,7 @@
 package labomatic
 
 import (
+	"errors"
 	"fmt"
 	"hash/maphash"
 	"net/netip"
@@ -85,6 +86,10 @@ var getaddr = starlark.NewBuiltin("addr", func(thread *starlark.Thread, fn *star
 	if err := starlark.UnpackArgs("addr", args, kwargs, "num", &num); err != nil {
 		return starlark.None, err
 	}
+	if nn.host && num == 1<<(32-nn.network.Bits())-2 {
+		return starlark.None, errors.New("last address in host networks is always the host")
+	}
+
 	addr := nn.network.Addr()
 	for range num {
 		addr = addr.Next()
@@ -95,3 +100,12 @@ var getaddr = starlark.NewBuiltin("addr", func(thread *starlark.Thread, fn *star
 
 	return Addr(addr), nil
 })
+
+// last returns the last assignable address in pf (so network broadcast - 1)
+func last(pf netip.Prefix) netip.Addr {
+	bits := pf.Addr().As4()
+	ui := uint32(bits[0])<<24 | uint32(bits[1])<<16 | uint32(bits[2])<<8 | uint32(bits[3])
+	ui |= ^uint32(0) >> uint32(pf.Bits())
+	ui--
+	return netip.AddrFrom4([...]byte{byte(ui >> 24), byte(ui >> 16), byte(ui >> 8), byte(ui)})
+}

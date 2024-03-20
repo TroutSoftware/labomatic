@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
+	"net/netip"
 	"os"
 	"os/exec"
 	"os/signal"
@@ -34,7 +35,6 @@ func Build(nodes starlark.StringDict) error {
 	if err != nil {
 		return fmt.Errorf("cannot create namespace: %w", err)
 	}
-	defer netns.DeleteNamed("lab")
 	parent, err := netlink.NewHandleAt(ns)
 	if err != nil {
 		return fmt.Errorf("cannot get ns handle: %w", err)
@@ -80,16 +80,21 @@ func Build(nodes starlark.StringDict) error {
 					},
 					PeerName: "lab_" + net.name,
 				}
-				clean, err := addveth(parent, origns, veth)
+				err := addveth(parent, origns, veth,
+					func(l netlink.Link) error {
+						na := netip.PrefixFrom(last(net.network), net.network.Bits()) // last address always assigned to host
+						addr, _ := netlink.ParseAddr(na.String())
+						return netlink.AddrAdd(l, addr)
+					},
+				)
 				if err != nil {
 					return fmt.Errorf("cannot create host handle: %w", err)
 				}
-				defer clean()
 			}
 		}
 	}
 
-	fmt.Println("\033[38;5;2m- Internal networks are up and running!\033[0m")
+	fmt.Println("\033[38;5;2m- Internal networks created\033[0m")
 
 	// second pass: virtual connectors outside
 	{
@@ -101,14 +106,13 @@ func Build(nodes starlark.StringDict) error {
 			},
 			PeerName: "admin",
 		}
-		clean, err := addveth(parent, origns, veth, func(peer netlink.Link) error {
+		err := addveth(parent, origns, veth, func(peer netlink.Link) error {
 			addr, _ := netlink.ParseAddr("169.254.169.1/30")
 			return netlink.AddrAdd(peer, addr)
 		})
 		if err != nil {
 			return fmt.Errorf("cannot create host handle: %w", err)
 		}
-		defer clean()
 
 		addr, _ := netlink.ParseAddr("169.254.169.2/30")
 		if err := netlink.AddrAdd(veth, addr); err != nil {
@@ -118,6 +122,7 @@ func Build(nodes starlark.StringDict) error {
 	}
 	fmt.Println("\033[38;5;2m- Serial over Telnet available\033[0m")
 
+	var errc int
 	// second pass: the taps
 	for sname, node := range nodes {
 		switch node := node.(type) {
@@ -146,18 +151,19 @@ func Build(nodes starlark.StringDict) error {
 
 			// note this run in the same LockOSThread so that network namespace is kept
 			if err := RunVM(sname, node, taps); err != nil {
-				return fmt.Errorf("cannot create vm %s: %w", node.name, err)
+				errc++
+				fmt.Printf("\033[38;9;2m ⚠️   cannot create vm %s: %s\033[0m\n", node.name, err)
 			}
 		}
 	}
 
-	fmt.Println("\033[38;5;2m- Virtual machines are up and running!\033[0m")
+	fmt.Printf("\033[38;5;2m- Virtual machines started (%d fail) \033[0m\n", errc)
 	<-KillChan
 	for _, p := range VMS {
 		p.Process.Kill()
 	}
 
-	return nil
+	return netns.DeleteNamed("lab")
 }
 
 // add and set up
@@ -173,42 +179,41 @@ func addup(parent *netlink.Handle, lk netlink.Link) error {
 
 // addveth sets up a veth device in ns1, with lk.Peer in ns2.
 // configurations applied to the link after it gets moved to the new namespace.
-func addveth(ns1 *netlink.Handle, ns2 netns.NsHandle, lk *netlink.Veth, cfg ...func(netlink.Link) error) (func() error, error) {
+func addveth(ns1 *netlink.Handle, ns2 netns.NsHandle, lk *netlink.Veth, cfg ...func(netlink.Link) error) error {
 	if err := addup(ns1, lk); err != nil {
-		return nil, fmt.Errorf("creating host handle: %w", err)
+		return fmt.Errorf("creating host handle: %w", err)
 	}
 	peer, err := netlink.LinkByName(lk.PeerName)
 	if err != nil {
-		return nil, fmt.Errorf("creating host handle: cannot find peer: %w", err)
+		return fmt.Errorf("creating host handle: cannot find peer: %w", err)
 	}
 
 	if err := netlink.LinkSetNsFd(peer, int(ns2)); err != nil {
-		return nil, fmt.Errorf("cannot port host handle: %w", err)
+		return fmt.Errorf("cannot port host handle: %w", err)
 	}
 	ch, err := netns.Get()
 	if err != nil {
-		return nil, fmt.Errorf("cannot get current handle")
+		return fmt.Errorf("cannot get current handle")
 	}
 
 	if err := netns.Set(ns2); err != nil {
-		return nil, fmt.Errorf("cannot switch to host handle: %w", err)
+		return fmt.Errorf("cannot switch to host handle: %w", err)
 	}
 	peer, err = netlink.LinkByName(lk.PeerName)
 	if err != nil {
-		return nil, fmt.Errorf("cannot find peer after port: %w", err)
+		return fmt.Errorf("cannot find peer after port: %w", err)
 	}
 
 	if err := netlink.LinkSetUp(peer); err != nil {
-		return nil, fmt.Errorf("creating admin handle: %w", err)
+		return fmt.Errorf("creating admin handle: %w", err)
 	}
 	for _, cfg := range cfg {
 		if err := cfg(peer); err != nil {
-			return nil, fmt.Errorf("configuring peer handle: %w", err)
+			return fmt.Errorf("configuring peer handle: %w", err)
 		}
 	}
 
-	clean := func() error { return netlink.LinkDel(peer) }
-	return clean, netns.Set(ch)
+	return netns.Set(ch)
 }
 
 var (
@@ -267,11 +272,10 @@ func RunVM(vname string, node *netnode, taps map[string]*os.File) error {
 		"-chardev", fmt.Sprintf("socket,id=ga0,host=127.0.10.1,port=%d,server=on,wait=off", TelnetNum),
 		"-device", "virtio-serial",
 		"-device", fmt.Sprintf("virtserialport,chardev=ga0,name=%s", guestagent),
-		// "-serial", fmt.Sprintf("telnet:169.254.169.2:%d,server", TelnetNum),
-		"-serial", "pty",
+		"-serial", fmt.Sprintf("telnet:169.254.169.2:%d,server,wait=off,nodelay=on", TelnetNum),
 		"-drive", fmt.Sprintf("if=virtio,format=qcow2,file=%s", vst),
 	}
-	fmt.Printf("	Connect to %s using:    telnet 169.254.169.2 %d\n", node.name, TelnetNum)
+	fmt.Printf("	Connect to \033[38;5;7m%s\033[0m using:    telnet 169.254.169.2 %d\n", node.name, TelnetNum)
 
 	const fdtap = 3 // since stderr / stdout / stdin are passed
 	for i, iface := range node.ifcs {
@@ -282,8 +286,6 @@ func RunVM(vname string, node *netnode, taps map[string]*os.File) error {
 	}
 	cm := exec.Command("/usr/bin/qemu-system-x86_64", args...)
 	cm.Stderr = os.Stderr
-	cm.Stdout = os.Stdout
-	cm.Stdin = os.Stdin
 	for _, iface := range node.ifcs {
 		cm.ExtraFiles = append(cm.ExtraFiles, taps[iface.name])
 	}
@@ -301,6 +303,9 @@ func ExecGuest(portnum int, tpl string, dt TemplateNode) error {
 	time.Sleep(2 * time.Second) // give the VM some time to start
 
 	qmp, err := OpenQMP("lab", "tcp", fmt.Sprintf("127.0.10.1:%d", portnum))
+	if err != nil {
+		return fmt.Errorf("cannot contact qmp: %w", err)
+	}
 
 	if err := qmp.Do("guest-ping", nil, nil); err != nil {
 		return fmt.Errorf("cannot ping: %w", err)
@@ -330,6 +335,29 @@ func ExecGuest(portnum int, tpl string, dt TemplateNode) error {
 		return fmt.Errorf("running provisioning script: %w", err)
 	}
 
+	// wait for interfaces to be up.
+	// note we expect the VM to have possibly more interfaces than the template (e.g lo)
+waitUp:
+	wantnames := make(map[string]bool)
+	for _, iface := range dt.Interfaces {
+		wantnames[iface.Name] = true
+	}
+	var GuestNetworkInterface []struct {
+		Name string `json:"name"`
+	}
+	if err := qmp.Do("guest-network-get-interfaces", nil, &GuestNetworkInterface); err != nil {
+		return fmt.Errorf("listing interfaces: %w", err)
+	}
+
+	for _, iface := range GuestNetworkInterface {
+		delete(wantnames, iface.Name)
+	}
+
+	if len(wantnames) > 0 {
+		time.Sleep(2 * time.Second)
+		goto waitUp
+	}
+
 	for {
 		var GuestExecStatus struct {
 			Exited   bool   `json:"exited"`
@@ -342,6 +370,8 @@ func ExecGuest(portnum int, tpl string, dt TemplateNode) error {
 		if err != nil {
 			return fmt.Errorf("canot exec status")
 		}
+
+		fmt.Println("results", string(GuestExecStatus.OutData))
 
 		if GuestExecStatus.Exited {
 			if GuestExecStatus.ExitCode == 0 {
