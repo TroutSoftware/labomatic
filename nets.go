@@ -45,10 +45,15 @@ func NewSubnet(th *starlark.Thread, fn *starlark.Builtin, args starlark.Tuple, k
 }
 
 type subnet struct {
-	name    string
-	frozen  bool
-	tag     int
-	host    bool
+	name   string
+	frozen bool
+	// VLAN tag (currently not implemented)
+	tag int
+	// host is made available to the bridge, at the last network address
+	host bool
+	// use SPICE user-level network instead of a bridge
+	user bool
+
 	network netip.Prefix
 	mbs     []*netiface
 }

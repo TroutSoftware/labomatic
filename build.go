@@ -2,6 +2,7 @@ package labomatic
 
 import (
 	"bytes"
+	"crypto/rand"
 	"errors"
 	"fmt"
 	"net/netip"
@@ -125,35 +126,41 @@ func Build(nodes starlark.StringDict) error {
 	var errc int
 	// second pass: the taps
 	for sname, node := range nodes {
-		switch node := node.(type) {
-		case *netnode:
-			taps := make(map[string]*os.File)
-			for _, iface := range node.ifcs {
-				br, err := parent.LinkByName(iface.net.name)
-				if err != nil {
-					return fmt.Errorf("cannot find parent bridge %s: %w", iface.net.name, err)
-				}
-				ifname := fmt.Sprintf("%s_%s", node.name, iface.name)
-				tt := &netlink.Tuntap{
-					LinkAttrs: netlink.LinkAttrs{
-						Name:        ifname,
-						MasterIndex: br.Attrs().Index,
-						TxQLen:      -1,
-					},
-					Mode:   netlink.TUNTAP_MODE_TAP,
-					Queues: 1,
-				}
-				if err := addup(parent, tt); err != nil {
-					return fmt.Errorf("creating tap device %w", err)
-				}
-				taps[iface.name] = tt.Fds[0] // one queue
+		node, ok := node.(*netnode)
+		if !ok {
+			continue
+		}
+
+		taps := make(map[string]*os.File)
+		for i, iface := range node.ifcs {
+			if iface.net.user {
+				continue // not creating taps for those
 			}
 
-			// note this run in the same LockOSThread so that network namespace is kept
-			if err := RunVM(sname, node, taps); err != nil {
-				errc++
-				fmt.Printf("\033[38;9;2m ⚠️   cannot create vm %s: %s\033[0m\n", node.name, err)
+			br, err := parent.LinkByName(iface.net.name)
+			if err != nil {
+				return fmt.Errorf("cannot find parent bridge %s: %w", iface.net.name, err)
 			}
+			ifname := fmt.Sprintf("%s_e%d", node.name, i)
+			tt := &netlink.Tuntap{
+				LinkAttrs: netlink.LinkAttrs{
+					Name:        ifname,
+					MasterIndex: br.Attrs().Index,
+					TxQLen:      -1,
+				},
+				Mode:   netlink.TUNTAP_MODE_TAP,
+				Queues: 1,
+			}
+			if err := addup(parent, tt); err != nil {
+				return fmt.Errorf("creating tap device %w", err)
+			}
+			taps[iface.name] = tt.Fds[0] // one queue
+		}
+
+		// note this run in the same LockOSThread so that network namespace is kept
+		if err := RunVM(sname, node, taps); err != nil {
+			errc++
+			fmt.Printf("\033[38;9;2m ⚠️   cannot create vm %s: %s\033[0m\n", node.name, err)
 		}
 	}
 
@@ -229,8 +236,7 @@ var (
 	VMS      []*exec.Cmd
 	KillChan = make(chan os.Signal)
 
-	TelnetNum     = 23 // standard telnet
-	LastMac   Mac = 1
+	TelnetNum = 23 // standard telnet
 )
 
 func init() {
@@ -279,10 +285,15 @@ func RunVM(vname string, node *netnode, taps map[string]*os.File) error {
 
 	const fdtap = 3 // since stderr / stdout / stdin are passed
 	for i, iface := range node.ifcs {
-		args = append(args,
-			"-nic", fmt.Sprintf("tap,id=%s,fd=%d,model=virtio,mac=52:54:00:%s", iface.name, fdtap+i, LastMac),
-		)
-		LastMac++
+		if iface.net.user {
+			args = append(args,
+				"-nic", fmt.Sprintf("user,ipv6=off,model=virtio,mac=52:54:98:%s", rndmac()),
+			)
+		} else {
+			args = append(args,
+				"-nic", fmt.Sprintf("tap,fd=%d,model=virtio,mac=52:54:00:%s", fdtap+i, rndmac()),
+			)
+		}
 	}
 	cm := exec.Command("/usr/bin/qemu-system-x86_64", args...)
 	cm.Stderr = os.Stderr
@@ -311,6 +322,29 @@ func ExecGuest(portnum int, tpl string, dt TemplateNode) error {
 		return fmt.Errorf("cannot ping: %w", err)
 	}
 
+	// wait for interfaces to be up.
+	// note we expect the VM to have possibly more interfaces than the template (e.g lo)
+waitUp:
+	wantnames := make(map[string]bool)
+	for _, iface := range dt.Interfaces {
+		wantnames[iface.Name] = true
+	}
+	var GuestNetworkInterface []struct {
+		Name string `json:"name"`
+	}
+	if err := qmp.Do("guest-network-get-interfaces", nil, &GuestNetworkInterface); err != nil {
+		return fmt.Errorf("listing interfaces: %w", err)
+	}
+
+	for _, iface := range GuestNetworkInterface {
+		delete(wantnames, iface.Name)
+	}
+
+	if len(wantnames) > 0 {
+		time.Sleep(2 * time.Second)
+		goto waitUp
+	}
+
 	exp, err := template.ParseFiles(tpl)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
@@ -335,29 +369,6 @@ func ExecGuest(portnum int, tpl string, dt TemplateNode) error {
 		return fmt.Errorf("running provisioning script: %w", err)
 	}
 
-	// wait for interfaces to be up.
-	// note we expect the VM to have possibly more interfaces than the template (e.g lo)
-waitUp:
-	wantnames := make(map[string]bool)
-	for _, iface := range dt.Interfaces {
-		wantnames[iface.Name] = true
-	}
-	var GuestNetworkInterface []struct {
-		Name string `json:"name"`
-	}
-	if err := qmp.Do("guest-network-get-interfaces", nil, &GuestNetworkInterface); err != nil {
-		return fmt.Errorf("listing interfaces: %w", err)
-	}
-
-	for _, iface := range GuestNetworkInterface {
-		delete(wantnames, iface.Name)
-	}
-
-	if len(wantnames) > 0 {
-		time.Sleep(2 * time.Second)
-		goto waitUp
-	}
-
 	for {
 		var GuestExecStatus struct {
 			Exited   bool   `json:"exited"`
@@ -371,7 +382,11 @@ waitUp:
 			return fmt.Errorf("canot exec status")
 		}
 
-		fmt.Println("results", string(GuestExecStatus.OutData))
+		if len(GuestExecStatus.OutData) > 0 {
+			fmt.Println("--- script results ---")
+			fmt.Println(string(GuestExecStatus.OutData))
+			fmt.Println("-----------------")
+		}
 
 		if GuestExecStatus.Exited {
 			if GuestExecStatus.ExitCode == 0 {
@@ -381,4 +396,10 @@ waitUp:
 		}
 		time.Sleep(2 * time.Second)
 	}
+}
+
+func rndmac() string {
+	mc := make([]byte, 3)
+	rand.Read(mc)
+	return fmt.Sprintf("%x:%x:%x", mc[0], mc[1], mc[2])
 }
