@@ -238,3 +238,22 @@ type TemplateNode struct {
 		Network netip.Prefix
 	}
 }
+
+func (n *netnode) ToTemplate() TemplateNode {
+	t := TemplateNode{
+		Name:  n.name,
+		Image: n.image,
+	}
+	for _, iface := range n.ifcs {
+		t.Interfaces = append(t.Interfaces, struct {
+			Name    string
+			Address netip.Addr
+			Network netip.Prefix
+		}{
+			Name:    iface.name,
+			Address: netip.Addr(iface.addr),
+			Network: iface.net.network,
+		})
+	}
+	return t
+}

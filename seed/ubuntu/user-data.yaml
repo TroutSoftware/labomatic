@@ -1,0 +1,8 @@
+#cloud-config
+ssh_authorized_keys:
+ - "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIE45Vai+zEse3sdy17Jfih6Yb+kWB3Kw7LqlNs/5k5oN romain@tolkien"
+password: "$1$thesault$nWDYzinFoHb2XX3vVy2St/"
+chpasswd: { expire: False }
+ssh_pwauth: True
+package_update: true
+packages: [qemu-guest-agent]

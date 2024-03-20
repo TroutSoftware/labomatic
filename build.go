@@ -1,12 +1,16 @@
 package labomatic
 
 import (
+	"bytes"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
 	"os/signal"
 	"path/filepath"
 	"runtime"
+	"text/template"
+	"time"
 
 	"github.com/vishvananda/netlink"
 	"github.com/vishvananda/netns"
@@ -30,6 +34,7 @@ func Build(nodes starlark.StringDict) error {
 	if err != nil {
 		return fmt.Errorf("cannot create namespace: %w", err)
 	}
+	defer netns.DeleteNamed("lab")
 	parent, err := netlink.NewHandleAt(ns)
 	if err != nil {
 		return fmt.Errorf("cannot get ns handle: %w", err)
@@ -75,10 +80,11 @@ func Build(nodes starlark.StringDict) error {
 					},
 					PeerName: "lab_" + net.name,
 				}
-				if err := addveth(parent, origns, veth); err != nil {
+				clean, err := addveth(parent, origns, veth)
+				if err != nil {
 					return fmt.Errorf("cannot create host handle: %w", err)
 				}
-
+				defer clean()
 			}
 		}
 	}
@@ -95,12 +101,14 @@ func Build(nodes starlark.StringDict) error {
 			},
 			PeerName: "admin",
 		}
-		if err := addveth(parent, origns, veth, func(peer netlink.Link) error {
+		clean, err := addveth(parent, origns, veth, func(peer netlink.Link) error {
 			addr, _ := netlink.ParseAddr("169.254.169.1/30")
 			return netlink.AddrAdd(peer, addr)
-		}); err != nil {
+		})
+		if err != nil {
 			return fmt.Errorf("cannot create host handle: %w", err)
 		}
+		defer clean()
 
 		addr, _ := netlink.ParseAddr("169.254.169.2/30")
 		if err := netlink.AddrAdd(veth, addr); err != nil {
@@ -149,7 +157,7 @@ func Build(nodes starlark.StringDict) error {
 		p.Process.Kill()
 	}
 
-	return netns.DeleteNamed("lab")
+	return nil
 }
 
 // add and set up
@@ -165,46 +173,50 @@ func addup(parent *netlink.Handle, lk netlink.Link) error {
 
 // addveth sets up a veth device in ns1, with lk.Peer in ns2.
 // configurations applied to the link after it gets moved to the new namespace.
-func addveth(ns1 *netlink.Handle, ns2 netns.NsHandle, lk *netlink.Veth, cfg ...func(netlink.Link) error) error {
+func addveth(ns1 *netlink.Handle, ns2 netns.NsHandle, lk *netlink.Veth, cfg ...func(netlink.Link) error) (func() error, error) {
 	if err := addup(ns1, lk); err != nil {
-		return fmt.Errorf("creating host handle: %w", err)
+		return nil, fmt.Errorf("creating host handle: %w", err)
 	}
 	peer, err := netlink.LinkByName(lk.PeerName)
 	if err != nil {
-		return fmt.Errorf("creating host handle: cannot find peer: %w", err)
+		return nil, fmt.Errorf("creating host handle: cannot find peer: %w", err)
 	}
 
 	if err := netlink.LinkSetNsFd(peer, int(ns2)); err != nil {
-		return fmt.Errorf("cannot port host handle: %w", err)
+		return nil, fmt.Errorf("cannot port host handle: %w", err)
 	}
 	ch, err := netns.Get()
 	if err != nil {
-		return fmt.Errorf("cannot get current handle")
+		return nil, fmt.Errorf("cannot get current handle")
 	}
 
 	if err := netns.Set(ns2); err != nil {
-		return fmt.Errorf("cannot switch to host handle: %w", err)
+		return nil, fmt.Errorf("cannot switch to host handle: %w", err)
 	}
 	peer, err = netlink.LinkByName(lk.PeerName)
 	if err != nil {
-		return fmt.Errorf("cannot find peer after port: %w", err)
+		return nil, fmt.Errorf("cannot find peer after port: %w", err)
 	}
 
 	if err := netlink.LinkSetUp(peer); err != nil {
-		return fmt.Errorf("creating admin handle: %w", err)
+		return nil, fmt.Errorf("creating admin handle: %w", err)
 	}
 	for _, cfg := range cfg {
 		if err := cfg(peer); err != nil {
-			return fmt.Errorf("configuring peer handle: %w", err)
+			return nil, fmt.Errorf("configuring peer handle: %w", err)
 		}
 	}
 
-	return netns.Set(ch)
+	clean := func() error { return netlink.LinkDel(peer) }
+	return clean, netns.Set(ch)
 }
 
 var (
 	UbuntuImage   = "/var/lib/labomatic/ubuntu-22.04.qcow"
 	MikrotikImage = "/var/lib/labomatic/chr-7.14.qcow"
+
+	UbuntuGuestAgent   = "org.qemu.guest_agent.0"
+	MikrotikGuestAgent = "chr.provision_agent"
 
 	TmpDir string
 
@@ -212,7 +224,8 @@ var (
 	VMS      []*exec.Cmd
 	KillChan = make(chan os.Signal)
 
-	TelnetNum = 23 // standard telnet
+	TelnetNum     = 23 // standard telnet
+	LastMac   Mac = 1
 )
 
 func init() {
@@ -222,14 +235,16 @@ func init() {
 }
 
 func RunVM(vname string, node *netnode, taps map[string]*os.File) error {
-	var base string
+	var base, guestagent string
 	switch node.typ {
 	default:
 		panic("unknown node type")
 	case nodeRouter:
 		base = MikrotikImage
+		guestagent = MikrotikGuestAgent
 	case nodeHost:
 		base = UbuntuImage
+		guestagent = UbuntuGuestAgent
 	}
 
 	vst := filepath.Join(TmpDir, vname+".qcow2")
@@ -241,6 +256,7 @@ func RunVM(vname string, node *netnode, taps map[string]*os.File) error {
 		return fmt.Errorf("creating disk: %w", err)
 	}
 
+	TelnetNum++
 	// TODO initialize cloudinit from templates
 	args := []string{
 		"-machine", "accel=kvm,type=q35",
@@ -248,16 +264,21 @@ func RunVM(vname string, node *netnode, taps map[string]*os.File) error {
 		"-m", "2G",
 		"-nographic",
 		"-monitor", "none",
-		"-chardev", fmt.Sprintf("socket,id=ga0,path=/tmp/%s,server=on,wait=off", vname),
-		"-serial", fmt.Sprintf("telnet:169.254.169.2:%d,server", TelnetNum),
+		"-chardev", fmt.Sprintf("socket,id=ga0,host=127.0.10.1,port=%d,server=on,wait=off", TelnetNum),
+		"-device", "virtio-serial",
+		"-device", fmt.Sprintf("virtserialport,chardev=ga0,name=%s", guestagent),
+		// "-serial", fmt.Sprintf("telnet:169.254.169.2:%d,server", TelnetNum),
+		"-serial", "pty",
 		"-drive", fmt.Sprintf("if=virtio,format=qcow2,file=%s", vst),
 	}
-	TelnetNum++
+	fmt.Printf("	Connect to %s using:    telnet 169.254.169.2 %d\n", node.name, TelnetNum)
+
 	const fdtap = 3 // since stderr / stdout / stdin are passed
 	for i, iface := range node.ifcs {
 		args = append(args,
-			"-nic", fmt.Sprintf("tap,id=%s,fd=%d,model=virtio", iface.name, fdtap+i),
+			"-nic", fmt.Sprintf("tap,id=%s,fd=%d,model=virtio,mac=52:54:00:%s", iface.name, fdtap+i, LastMac),
 		)
+		LastMac++
 	}
 	cm := exec.Command("/usr/bin/qemu-system-x86_64", args...)
 	cm.Stderr = os.Stderr
@@ -269,5 +290,65 @@ func RunVM(vname string, node *netnode, taps map[string]*os.File) error {
 
 	VMS = append(VMS, cm)
 
-	return cm.Start()
+	if err := cm.Start(); err != nil {
+		return fmt.Errorf("running qemu: %w", err)
+	}
+
+	return ExecGuest(TelnetNum, vname+"_init", node.ToTemplate())
+}
+
+func ExecGuest(portnum int, tpl string, dt TemplateNode) error {
+	time.Sleep(2 * time.Second) // give the VM some time to start
+
+	qmp, err := OpenQMP("lab", "tcp", fmt.Sprintf("127.0.10.1:%d", portnum))
+
+	if err := qmp.Do("guest-ping", nil, nil); err != nil {
+		return fmt.Errorf("cannot ping: %w", err)
+	}
+
+	exp, err := template.ParseFiles(tpl)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil
+		}
+		return fmt.Errorf("invalid template %s: %w", tpl, err)
+	}
+
+	buf := new(bytes.Buffer)
+	if err := exp.Execute(buf, dt); err != nil {
+		return fmt.Errorf("invalid template %s: %w", tpl, err)
+	}
+
+	var execresult struct {
+		PID int `json:"pid"`
+	}
+	err = qmp.Do("guest-exec", struct {
+		InputData     []byte `json:"input-data"`
+		CaptureOutput bool   `json:"capture-output"`
+	}{buf.Bytes(), true}, &execresult)
+	if err != nil {
+		return fmt.Errorf("running provisioning script: %w", err)
+	}
+
+	for {
+		var GuestExecStatus struct {
+			Exited   bool   `json:"exited"`
+			ExitCode int    `json:"exitcode"`
+			OutData  []byte `json:"out-data"`
+		}
+		err := qmp.Do("guest-exec-status", struct {
+			PID int `json:"pid"`
+		}{execresult.PID}, &GuestExecStatus)
+		if err != nil {
+			return fmt.Errorf("canot exec status")
+		}
+
+		if GuestExecStatus.Exited {
+			if GuestExecStatus.ExitCode == 0 {
+				return nil
+			}
+			return fmt.Errorf("Error running script: %s", GuestExecStatus.OutData)
+		}
+		time.Sleep(2 * time.Second)
+	}
 }
