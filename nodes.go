@@ -131,6 +131,7 @@ func (r netnode) AttrNames() (attrs []string) {
 
 	return append(attrs,
 		"name",
+		"init_script",
 		"attach_iface",
 	)
 }
@@ -191,8 +192,25 @@ func (r *netnode) SetField(name string, val starlark.Value) error {
 		return starlark.NoSuchAttrError(name)
 	case "name":
 		r.name = val.String()
+	case "init_script":
+		ss, ok := val.(starlark.String)
+		if !ok {
+			return errors.New("invalid type for init script (want string)")
+		}
+		r.init = ss.GoString()
 	}
 	return nil
+}
+
+func (r *netnode) agent() GuestAgent {
+	switch r.typ {
+	case nodeRouter:
+		return chr{}
+	case nodeHost:
+		return ubuntu{}
+	default:
+		panic("unknown node type")
+	}
 }
 
 type netiface struct {

@@ -4,8 +4,8 @@ import (
 	"bytes"
 	"context"
 	"crypto/rand"
-	"errors"
 	"fmt"
+	"log/slog"
 	"net/netip"
 	"os"
 	"os/exec"
@@ -282,9 +282,6 @@ var (
 	UbuntuImage   = "/var/lib/labomatic/ubuntu-22.04.qcow"
 	MikrotikImage = "/var/lib/labomatic/chr-7.14.qcow"
 
-	UbuntuGuestAgent   = "org.qemu.guest_agent.0"
-	MikrotikGuestAgent = "chr.provision_agent"
-
 	TmpDir string
 
 	// global variables, the script is not persistent…
@@ -301,16 +298,14 @@ func init() {
 }
 
 func RunVM(vname string, node *netnode, taps map[string]*os.File) error {
-	var base, guestagent string
+	var base string
 	switch node.typ {
 	default:
 		panic("unknown node type")
 	case nodeRouter:
 		base = MikrotikImage
-		guestagent = MikrotikGuestAgent
 	case nodeHost:
 		base = UbuntuImage
-		guestagent = UbuntuGuestAgent
 	}
 
 	vst := filepath.Join(TmpDir, vname+".qcow2")
@@ -332,7 +327,7 @@ func RunVM(vname string, node *netnode, taps map[string]*os.File) error {
 		"-monitor", "none",
 		"-chardev", fmt.Sprintf("socket,id=ga0,host=127.0.10.1,port=%d,server=on,wait=off", TelnetNum),
 		"-device", "virtio-serial",
-		"-device", fmt.Sprintf("virtserialport,chardev=ga0,name=%s", guestagent),
+		"-device", fmt.Sprintf("virtserialport,chardev=ga0,name=%s", node.agent().Path()),
 		"-serial", fmt.Sprintf("telnet:169.254.169.2:%d,server,wait=off,nodelay=on", TelnetNum),
 		"-drive", fmt.Sprintf("if=virtio,format=qcow2,file=%s", vst),
 	}
@@ -362,10 +357,10 @@ func RunVM(vname string, node *netnode, taps map[string]*os.File) error {
 		return fmt.Errorf("running qemu: %w", err)
 	}
 
-	return ExecGuest(TelnetNum, vname+"_init", node.ToTemplate())
+	return ExecGuest(TelnetNum, node)
 }
 
-func ExecGuest(portnum int, tpl string, dt TemplateNode) error {
+func ExecGuest(portnum int, node *netnode) error {
 	time.Sleep(2 * time.Second) // give the VM some time to start
 
 	qmp, err := OpenQMP("lab", "tcp", fmt.Sprintf("127.0.10.1:%d", portnum))
@@ -376,6 +371,8 @@ func ExecGuest(portnum int, tpl string, dt TemplateNode) error {
 	if err := qmp.Do("guest-ping", nil, nil); err != nil {
 		return fmt.Errorf("cannot ping: %w", err)
 	}
+
+	dt := node.ToTemplate()
 
 	// wait for interfaces to be up.
 	// note we expect the VM to have possibly more interfaces than the template (e.g lo)
@@ -399,32 +396,31 @@ waitUp:
 		time.Sleep(2 * time.Second)
 		goto waitUp
 	}
+	if len(node.init) == 0 {
+		return nil
+	}
 
-	exp, err := template.ParseFiles(tpl)
+	exp, err := template.New("init").Parse(node.init)
 	if err != nil {
-		if errors.Is(err, os.ErrNotExist) {
-			return nil
-		}
-		return fmt.Errorf("invalid template %s: %w", tpl, err)
+		return fmt.Errorf("invalid init script: %w", err)
 	}
 
 	buf := new(bytes.Buffer)
 	if err := exp.Execute(buf, dt); err != nil {
-		return fmt.Errorf("invalid template %s: %w", tpl, err)
+		return fmt.Errorf("invalid init script: %w", err)
 	}
+	slog.Debug("execute on guest", "cmd", buf.String())
 
 	var execresult struct {
 		PID int `json:"pid"`
 	}
-	err = qmp.Do("guest-exec", struct {
-		InputData     []byte `json:"input-data"`
-		CaptureOutput bool   `json:"capture-output"`
-	}{buf.Bytes(), true}, &execresult)
+	err = qmp.Do("guest-exec", node.agent().Execute(buf.Bytes()), &execresult)
 	if err != nil {
 		return fmt.Errorf("running provisioning script: %w", err)
 	}
+	slog.Debug("exec script returns", "pid", execresult.PID)
 
-	for {
+	for range 10 {
 		var GuestExecStatus struct {
 			Exited   bool   `json:"exited"`
 			ExitCode int    `json:"exitcode"`
@@ -437,24 +433,53 @@ waitUp:
 			return fmt.Errorf("canot exec status")
 		}
 
-		if len(GuestExecStatus.OutData) > 0 {
-			fmt.Println("--- script results ---")
-			fmt.Println(string(GuestExecStatus.OutData))
-			fmt.Println("-----------------")
-		}
-
 		if GuestExecStatus.Exited {
 			if GuestExecStatus.ExitCode == 0 {
+				if len(GuestExecStatus.OutData) > 0 {
+					fmt.Println("--- script results ---")
+					fmt.Println(string(GuestExecStatus.OutData))
+					fmt.Println("-----------------")
+				}
 				return nil
 			}
 			return fmt.Errorf("Error running script: %s", GuestExecStatus.OutData)
 		}
+		slog.Debug("exec script did not terminate, continue")
 		time.Sleep(2 * time.Second)
 	}
+	return fmt.Errorf("could not properly seed machine")
 }
 
 func rndmac() string {
 	mc := make([]byte, 3)
 	rand.Read(mc)
 	return fmt.Sprintf("%x:%x:%x", mc[0], mc[1], mc[2])
+}
+
+// works around different implementations of the agent
+type GuestAgent interface {
+	Execute(data []byte) any
+	Path() string
+}
+
+type ubuntu struct{}
+
+func (q ubuntu) Execute(data []byte) any {
+	return struct {
+		Path          string `json:"path"`
+		InputData     []byte `json:"input-data"`
+		CaptureOutput bool   `json:"capture-output"`
+	}{"/bin/bash", data, true}
+}
+func (ubuntu) Path() string { return "org.qemu.guest_agent.0" }
+
+type chr struct{}
+
+func (chr) Path() string { return "chr.provision_agent" }
+
+func (chr) Execute(data []byte) any {
+	return struct {
+		InputData     []byte `json:"input-data"`
+		CaptureOutput bool   `json:"capture-output"`
+	}{data, true}
 }

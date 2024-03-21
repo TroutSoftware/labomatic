@@ -31,23 +31,25 @@ sudo qemu-system-x86_64  \
   -m 2G \
   -nographic \
   -device virtio-net-pci,netdev=net0 \
-  -netdev user,id=net0,hostfwd=tcp::2222-:22 \
+  -netdev user,id=net0 \
   -drive if=virtio,format=qcow2,file=/tmp/ubuntu-22.04-minimal-cloudimg-amd64.img \
   -drive if=virtio,format=raw,file=seed.img
 
 user-data.yaml
  #cloud-config
- ssh_authorized_keys:
-   - "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIE45Vai+zEse3sdy17Jfih6Yb+kWB3Kw7LqlNs/5k5oN romain@tolkien"
  password: "$1$thesault$nWDYzinFoHb2XX3vVy2St/"
  chpasswd: { expire: False }
- ssh_pwauth: True
  package_update: true
  packages: [qemu-guest-agent]
 
 metadata.yaml
 instance-id: iid-local01
 local-hostname: ubuntu-l1
+
+run 
+
+systemctl disable systemd-networkd-wait-online.service
+systemctl mask systemd-networkd-wait-online.service
 
 ## First install (Mikrotik)
 

@@ -3,6 +3,7 @@ package main
 import (
 	"flag"
 	"log"
+	"log/slog"
 	"os"
 
 	"github.com/TroutSoftware/labomatic"
@@ -11,13 +12,18 @@ import (
 )
 
 func main() {
-	labdir := flag.String("d", "lab", "name of the lab setup directory")
+	labdir := flag.String("d", "", "name of the lab setup directory")
+	verbose := flag.Bool("v", false, "show debug logs")
 	flag.Parse()
 
 	if *labdir != "" {
 		if err := os.Chdir(*labdir); err != nil {
 			log.Fatalf("cannot chdir to %s: %s", *labdir, err)
 		}
+	}
+
+	if *verbose {
+		slog.SetDefault(slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelDebug})))
 	}
 
 	var th starlark.Thread

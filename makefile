@@ -1,3 +1,3 @@
 all:
 	go build ./cmd/labomatic
-	sudo ./labomatic -d testdata/lab1/
+	sudo ./labomatic -d testdata/lab1/ -v
