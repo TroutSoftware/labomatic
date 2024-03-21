@@ -2,6 +2,7 @@ package labomatic
 
 import (
 	"bytes"
+	"context"
 	"crypto/rand"
 	"errors"
 	"fmt"
@@ -60,44 +61,63 @@ func Build(nodes starlark.StringDict) error {
 
 	// first pass: the bridges
 	for _, node := range nodes {
-		switch net := node.(type) {
-		case *subnet:
-			br := &netlink.Bridge{
+		net, ok := node.(*subnet)
+		if !ok {
+			continue
+		}
+
+		if net.user {
+			ipv := &netlink.IPVlan{
 				LinkAttrs: netlink.LinkAttrs{
 					Name:   net.name,
 					TxQLen: -1,
 				},
+				Mode: netlink.IPVLAN_MODE_L2,
 			}
-			if err := addup(parent, br); err != nil {
-				return fmt.Errorf("creating bridge: %w", err)
+			if err := addipvlan(parent, origns, net.link, ipv); err != nil {
+				return fmt.Errorf("creating network %s: %w", net.name, err)
 			}
-			if net.host {
-				veth := &netlink.Veth{
-					LinkAttrs: netlink.LinkAttrs{
-						NetNsID:     1,
-						Name:        "veth_" + net.name,
-						TxQLen:      -1,
-						MasterIndex: br.Attrs().Index,
-					},
-					PeerName: "lab_" + net.name,
-				}
-				err := addveth(parent, origns, veth,
-					func(l netlink.Link) error {
-						na := netip.PrefixFrom(last(net.network), net.network.Bits()) // last address always assigned to host
-						addr, _ := netlink.ParseAddr(na.String())
-						return netlink.AddrAdd(l, addr)
-					},
-				)
-				if err != nil {
-					return fmt.Errorf("cannot create host handle: %w", err)
-				}
+			if err := lease4(context.Background(), ipv); err != nil {
+				return fmt.Errorf("creating network %s: %w", net.name, err)
+			}
+			continue
+		}
+
+		br := &netlink.Bridge{
+			LinkAttrs: netlink.LinkAttrs{
+				Name:   net.name,
+				TxQLen: -1,
+			},
+		}
+		if err := addup(parent, br); err != nil {
+			return fmt.Errorf("creating bridge: %w", err)
+		}
+		if net.host {
+			veth := &netlink.Veth{
+				LinkAttrs: netlink.LinkAttrs{
+					NetNsID:     1,
+					Name:        "veth_" + net.name,
+					TxQLen:      -1,
+					MasterIndex: br.Attrs().Index,
+				},
+				PeerName: "lab_" + net.name,
+			}
+			err := addveth(parent, origns, veth,
+				func(l netlink.Link) error {
+					na := netip.PrefixFrom(last(net.network), net.network.Bits()) // last address always assigned to host
+					addr, _ := netlink.ParseAddr(na.String())
+					return netlink.AddrAdd(l, addr)
+				},
+			)
+			if err != nil {
+				return fmt.Errorf("cannot create host handle: %w", err)
 			}
 		}
 	}
 
 	fmt.Println("\033[38;5;2m- Internal networks created\033[0m")
 
-	// second pass: virtual connectors outside
+	// second pass: serial access
 	{
 		veth := &netlink.Veth{
 			LinkAttrs: netlink.LinkAttrs{
@@ -124,7 +144,7 @@ func Build(nodes starlark.StringDict) error {
 	fmt.Println("\033[38;5;2m- Serial over Telnet available\033[0m")
 
 	var errc int
-	// second pass: the taps
+	// third pass: the VMs
 	for sname, node := range nodes {
 		node, ok := node.(*netnode)
 		if !ok {
@@ -223,6 +243,41 @@ func addveth(ns1 *netlink.Handle, ns2 netns.NsHandle, lk *netlink.Veth, cfg ...f
 	return netns.Set(ch)
 }
 
+// addipvlan creates an IPVLAN device in ns1, based on parent from ns2
+func addipvlan(ns1 *netlink.Handle, ns2 netns.NsHandle, parent string, vl *netlink.IPVlan, cfg ...func(netlink.Link) error) error {
+	ch, err := netns.Get()
+	if err != nil {
+		return fmt.Errorf("cannot get current handle")
+	}
+
+	if err := netns.Set(ns2); err != nil {
+		return fmt.Errorf("cannot switch to host handle: %w", err)
+	}
+	pi, err := netlink.LinkByName(parent)
+	if err != nil {
+		return fmt.Errorf("invalid parent %s: %w", parent, err)
+	}
+
+	vl.ParentIndex = pi.Attrs().Index
+	if err := netlink.LinkAdd(vl); err != nil {
+		return fmt.Errorf("cannot create IPVLAN: %w", err)
+	}
+
+	if err := netlink.LinkSetNsFd(vl, int(ch)); err != nil {
+		return fmt.Errorf("cannot port host handle: %w", err)
+	}
+
+	if err := netns.Set(ch); err != nil {
+		return fmt.Errorf("cannot revert to original namespace: %w", err)
+	}
+
+	if err := netlink.LinkSetUp(vl); err != nil {
+		return fmt.Errorf("creating admin handle: %w", err)
+	}
+
+	return nil
+}
+
 var (
 	UbuntuImage   = "/var/lib/labomatic/ubuntu-22.04.qcow"
 	MikrotikImage = "/var/lib/labomatic/chr-7.14.qcow"
@@ -287,7 +342,7 @@ func RunVM(vname string, node *netnode, taps map[string]*os.File) error {
 	for i, iface := range node.ifcs {
 		if iface.net.user {
 			args = append(args,
-				"-nic", fmt.Sprintf("user,ipv6=off,model=virtio,mac=52:54:98:%s", rndmac()),
+				"-nic", fmt.Sprintf("user,ipv6=off,net=%s,model=virtio,mac=52:54:98:%s", iface.net.network, rndmac()),
 			)
 		} else {
 			args = append(args,

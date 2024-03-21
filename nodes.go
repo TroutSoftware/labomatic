@@ -16,6 +16,7 @@ var NetBlocks = starlark.StringDict{
 	"Router": starlark.NewBuiltin("Router", NewRouter),
 	"Host":   starlark.NewBuiltin("Host", NewHost),
 	"Subnet": starlark.NewBuiltin("Subnet", NewSubnet),
+	"Outnet": starlark.NewBuiltin("Outnet", NewIPVLAN),
 }
 
 func NewRouter(th *starlark.Thread, _ *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
@@ -114,8 +115,6 @@ func (r *netnode) Attr(name string) (starlark.Value, error) {
 		return attach_iface.BindReceiver(r), nil
 	case "name":
 		return starlark.String(r.name), nil
-	case "attach_usernic":
-		return attach_usernic.BindReceiver(r), nil
 	}
 
 	if idx := slices.IndexFunc(r.ifcs, func(iface *netiface) bool { return iface.name == name }); idx != -1 {
@@ -133,7 +132,6 @@ func (r netnode) AttrNames() (attrs []string) {
 	return append(attrs,
 		"name",
 		"attach_iface",
-		"attach_usernic",
 	)
 }
 
@@ -169,35 +167,6 @@ var attach_iface = starlark.NewBuiltin("attach_nic", func(thread *starlark.Threa
 	}
 
 	ifc := &netiface{name: ifname, host: nd, net: net, addr: addr}
-	nd.ifcs = append(nd.ifcs, ifc)
-	net.mbs = append(net.mbs, ifc)
-	return ifc, nil
-})
-
-var defaultUserNet, _ = netip.ParsePrefix("10.0.2.0/24")
-
-var attach_usernic = starlark.NewBuiltin("attach_usernic", func(thread *starlark.Thread, fn *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
-	nd, ok := fn.Receiver().(*netnode)
-	if !ok {
-		return starlark.None, fmt.Errorf("attach method called on wrong object")
-	}
-
-	if len(nd.ifcs) == 9 {
-		return starlark.None, errors.New("only 9 interfaces can be added")
-	}
-
-	// numbering: interfaces start at 1 for localhost
-	var ifname string
-	switch nd.typ {
-	case nodeRouter:
-		ifname = fmt.Sprintf("ether%d", len(nd.ifcs)+2)
-	case nodeHost:
-		ifname = fmt.Sprintf("enp0s%d", len(nd.ifcs)+2)
-	}
-
-	net := &subnet{user: true, network: defaultUserNet}
-
-	ifc := &netiface{name: ifname, host: nd, net: net}
 	nd.ifcs = append(nd.ifcs, ifc)
 	net.mbs = append(net.mbs, ifc)
 	return ifc, nil

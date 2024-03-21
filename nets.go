@@ -18,10 +18,10 @@ func NewSubnet(th *starlark.Thread, fn *starlark.Builtin, args starlark.Tuple, k
 		network string
 		host    bool
 	)
-	if err := starlark.UnpackArgs("Host", args, kwargs,
+	if err := starlark.UnpackArgs("Subnet", args, kwargs,
+		"network", &network,
 		"name?", &name,
 		"tag?", &tag,
-		"network?", &network,
 		"host?", &host); err != nil {
 		return starlark.None, fmt.Errorf("invalid constructor argument: %w", err)
 	}
@@ -44,6 +44,45 @@ func NewSubnet(th *starlark.Thread, fn *starlark.Builtin, args starlark.Tuple, k
 	}, nil
 }
 
+var defaultUserNet, _ = netip.ParsePrefix("10.0.2.0/24")
+
+func NewIPVLAN(th *starlark.Thread, fn *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
+	var (
+		name    string
+		link    string
+		network string
+	)
+
+	if err := starlark.UnpackArgs("Outnet", args, kwargs,
+		"link", &link,
+		"name?", name,
+		"net?", network,
+	); err != nil {
+		return starlark.None, fmt.Errorf("invalid constructor: %w", err)
+	}
+
+	if name == "" {
+		name = fmt.Sprintf("dx%d", netCount)
+		netCount++
+	}
+
+	sub := defaultUserNet
+	if network != "" {
+		var err error
+		sub, err = netip.ParsePrefix(network)
+		if err != nil {
+			return starlark.None, fmt.Errorf("invalid network specification %s: %w", network, err)
+		}
+	}
+
+	return &subnet{
+		name:    name,
+		user:    true,
+		link:    link,
+		network: sub,
+	}, nil
+}
+
 type subnet struct {
 	name   string
 	frozen bool
@@ -53,6 +92,8 @@ type subnet struct {
 	host bool
 	// use SPICE user-level network instead of a bridge
 	user bool
+	// attached networks
+	link string
 
 	network netip.Prefix
 	mbs     []*netiface
