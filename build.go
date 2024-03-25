@@ -411,11 +411,9 @@ waitUp:
 		time.Sleep(2 * time.Second)
 		goto waitUp
 	}
-	if len(node.init) == 0 {
-		return nil
-	}
 
-	exp, err := template.New("init").Parse(node.init)
+	iniscript := node.agent().defaultInit() + node.init
+	exp, err := template.New("init").Parse(iniscript)
 	if err != nil {
 		return fmt.Errorf("invalid init script: %w", err)
 	}
@@ -475,6 +473,7 @@ func rndmac() string {
 type GuestAgent interface {
 	Execute(data []byte) any
 	Path() string
+	defaultInit() string
 }
 
 type ubuntu struct{}
@@ -487,6 +486,17 @@ func (q ubuntu) Execute(data []byte) any {
 	}{"/bin/bash", data, true}
 }
 func (ubuntu) Path() string { return "org.qemu.guest_agent.0" }
+func (ubuntu) defaultInit() string {
+	return `{{ range .Interfaces }}
+	{{ if .Address.IsValid }}
+	sudo ip addr add {{.Address}}/{{.Network.Bits}} dev {{.Name}}
+	sudo ip link set {{.Name}} up
+	{{ else }}
+	sudo dhclient {{.Name}}
+	{{ end }}
+{{ end }}
+`
+}
 
 type chr struct{}
 
@@ -497,4 +507,15 @@ func (chr) Execute(data []byte) any {
 		InputData     []byte `json:"input-data"`
 		CaptureOutput bool   `json:"capture-output"`
 	}{data, true}
+}
+
+func (chr) defaultInit() string {
+	return `{{ range .Interfaces }}
+{{ if .Address.IsValid }}
+/ip/address/add interface={{.Name}} address={{.Address}}/{{.Network.Bits}}
+{{ else }}
+/ip/dhcp-client/add interface={{.Name}}
+{{ end }}
+{{ end }}
+`
 }
