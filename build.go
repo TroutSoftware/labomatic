@@ -108,6 +108,21 @@ func Build(nodes starlark.StringDict) error {
 					addr, _ := netlink.ParseAddr(na.String())
 					return netlink.AddrAdd(l, addr)
 				},
+				func(l netlink.Link) error {
+					if net.dns.Server == "" {
+						return nil
+					}
+					if err := exec.Command("/usr/bin/resolvectl", "dns", l.Attrs().Name, net.dns.Server).Run(); err != nil {
+						return fmt.Errorf("cannot configure dns server: %w", err)
+					}
+					if net.dns.Domain == "" {
+						return nil
+					}
+					if err := exec.Command("/usr/bin/resolvectl", "domain", l.Attrs().Name, net.dns.Domain).Run(); err != nil {
+						return fmt.Errorf("cannot configure dns domain: %w", err)
+					}
+					return nil
+				},
 			)
 			if err != nil {
 				return fmt.Errorf("cannot create host handle: %w", err)

@@ -17,12 +17,15 @@ func NewSubnet(th *starlark.Thread, fn *starlark.Builtin, args starlark.Tuple, k
 		tag     int
 		network string
 		host    bool
+
+		dns dnsConfig
 	)
 	if err := starlark.UnpackArgs("Subnet", args, kwargs,
 		"network", &network,
 		"name?", &name,
 		"tag?", &tag,
-		"host?", &host); err != nil {
+		"host?", &host,
+		"dns_server?", &dns.Server, "dns_domain?", &dns.Domain); err != nil {
 		return starlark.None, fmt.Errorf("invalid constructor argument: %w", err)
 	}
 
@@ -36,12 +39,26 @@ func NewSubnet(th *starlark.Thread, fn *starlark.Builtin, args starlark.Tuple, k
 		return starlark.None, fmt.Errorf("invalid network specification %s: %w", network, err)
 	}
 
+	switch {
+	case dns.Domain != "" && dns.Server == "":
+		return starlark.None, fmt.Errorf("DNS domain can only be set if dns_server is also provided")
+	case dns.Server != "" && !host:
+		return starlark.None, fmt.Errorf("DNS configuration only makes sense in host networks")
+	}
+
 	return &subnet{
 		name:    name,
 		tag:     tag,
 		network: sub,
 		host:    host,
+		dns:     dns,
 	}, nil
+}
+
+// config as seen from the host
+type dnsConfig struct {
+	Server string
+	Domain string
 }
 
 var defaultUserNet, _ = netip.ParsePrefix("10.0.2.0/24")
@@ -95,6 +112,8 @@ type subnet struct {
 	// attached networks
 	link string
 
+	dns dnsConfig
+
 	network netip.Prefix
 	mbs     []*netiface
 }
@@ -111,7 +130,10 @@ func (r subnet) Len() int                   { return len(r.mbs) }
 func (subnet) AttrNames() []string {
 	return []string{
 		"addr",
+		"dns_domain",
+		"dns_server",
 		"host",
+		"network",
 	}
 }
 
@@ -119,11 +141,17 @@ func (r *subnet) Attr(name string) (starlark.Value, error) {
 	switch name {
 	case "addr":
 		return getaddr.BindReceiver(r), nil
+	case "dns_domain":
+		return starlark.String(r.dns.Domain), nil
+	case "dns_server":
+		return starlark.String(r.dns.Server), nil
 	case "host":
 		return starlark.Bool(r.host), nil
+	case "network":
+		return Prefix(r.network), nil
 	}
 
-	return nil, nil
+	return nil, starlark.NoSuchAttrError(name)
 }
 
 var getaddr = starlark.NewBuiltin("addr", func(thread *starlark.Thread, fn *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
