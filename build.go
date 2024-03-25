@@ -12,6 +12,8 @@ import (
 	"os/signal"
 	"path/filepath"
 	"runtime"
+	"sync"
+	"sync/atomic"
 	"text/template"
 	"time"
 
@@ -198,8 +200,45 @@ func Build(nodes starlark.StringDict) error {
 			fmt.Printf("\033[38;9;2m ⚠️   cannot create vm %s: %s\033[0m\n", node.name, err)
 		}
 	}
-
 	fmt.Printf("\033[38;5;2m- Virtual machines started (%d fail) \033[0m\n", errc)
+
+	// forth pass: ansible playbooks
+	{
+		playbooks, _ := filepath.Glob("playbook_*.yaml")
+		if len(playbooks) > 0 {
+			fmt.Printf("- Starting %d playbooks\n", len(playbooks))
+		}
+
+		var errc atomic.Int32
+
+		var waitbooks sync.WaitGroup
+
+		for _, pb := range playbooks {
+			waitbooks.Add(1)
+			var bufout, buferr bytes.Buffer
+			ans := exec.Command("/usr/bin/ansible-playbook", "-i", "inventory", "--key-file", identity, pb)
+			ans.Stderr = &bufout
+			ans.Stdout = &buferr
+
+			pb := pb // linter not happy, despite Go 1.22…
+			go func() {
+				time.Sleep(2 * time.Second) // wait for SSH to start
+				if err := ans.Run(); err != nil {
+					fmt.Printf("\033[38;9;2m ⚠️   cannot run playbook %s: %s\033[0m\n", pb, err)
+					fmt.Println("[stdout]")
+					fmt.Println(bufout.String())
+					fmt.Println("[stderr]")
+					fmt.Println(buferr.String())
+					errc.Add(1)
+				}
+				waitbooks.Done()
+			}()
+		}
+		if len(playbooks) > 0 {
+			fmt.Printf("- Playbooks executed (%d fail)\n", errc.Load())
+		}
+	}
+
 	<-KillChan
 	for _, p := range VMS {
 		p.Process.Kill()
@@ -438,6 +477,7 @@ waitUp:
 			Exited   bool   `json:"exited"`
 			ExitCode int    `json:"exitcode"`
 			OutData  []byte `json:"out-data"`
+			ErrData  []byte `json:"err-data"`
 		}
 		err := qmp.Do("guest-exec-status", struct {
 			PID int `json:"pid"`
@@ -455,7 +495,11 @@ waitUp:
 				}
 				return nil
 			}
-			return fmt.Errorf("Error running script: %s", GuestExecStatus.OutData)
+			errdt := GuestExecStatus.ErrData
+			if errdt == nil {
+				errdt = GuestExecStatus.OutData
+			}
+			return fmt.Errorf("Error running script: %s", errdt)
 		}
 		slog.Debug("exec script did not terminate, continue")
 		time.Sleep(2 * time.Second)
@@ -488,13 +532,14 @@ func (q ubuntu) Execute(data []byte) any {
 func (ubuntu) Path() string { return "org.qemu.guest_agent.0" }
 func (ubuntu) defaultInit() string {
 	return `{{ range .Interfaces }}
-	{{ if .Address.IsValid }}
-	sudo ip addr add {{.Address}}/{{.Network.Bits}} dev {{.Name}}
-	sudo ip link set {{.Name}} up
-	{{ else }}
-	sudo dhclient {{.Name}}
-	{{ end }}
+{{- if .Address.IsValid }}
+sudo ip addr add {{.Address}}/{{.Network.Bits}} dev {{.Name}}
+sudo ip link set {{.Name}} up
+{{- else }}
+sudo dhclient {{.Name}}
 {{ end }}
+{{ end }}
+echo "{{.Host.PubKey}}" >> /home/ubuntu/.ssh/authorized_keys
 `
 }
 

@@ -262,12 +262,22 @@ type TemplateNode struct {
 		Address netip.Addr
 		Network netip.Prefix
 	}
+
+	Host struct {
+		PubKey string
+	}
 }
 
 func (n *netnode) ToTemplate() TemplateNode {
+	pub, err := gensshkeypair()
+	if err != nil {
+		panic("cannot generate key pair: " + err.Error())
+	}
+
 	t := TemplateNode{
 		Name:  n.name,
 		Image: n.image,
+		Host:  struct{ PubKey string }{string(pub)},
 	}
 	for _, iface := range n.ifcs {
 		t.Interfaces = append(t.Interfaces, struct {
