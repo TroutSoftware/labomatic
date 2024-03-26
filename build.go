@@ -539,6 +539,7 @@ sudo ip link set {{.Name}} up
 sudo dhclient {{.Name}}
 {{ end }}
 {{ end }}
+sudo hostnamectl set-hostname {{.Name}}
 echo "{{.Host.PubKey}}" >> /home/ubuntu/.ssh/authorized_keys
 `
 }
@@ -562,5 +563,6 @@ func (chr) defaultInit() string {
 /ip/dhcp-client/add interface={{.Name}}
 {{ end }}
 {{ end }}
+/system/identity/set name="{{.Name}}"
 `
 }

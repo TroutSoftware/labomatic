@@ -45,12 +45,10 @@ func NewRouter(th *starlark.Thread, _ *starlark.Builtin, args starlark.Tuple, kw
 
 func NewHost(th *starlark.Thread, _ *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
 	var (
-		name  string
-		image string = "alpine"
+		name string
 	)
 	if err := starlark.UnpackArgs("Host", args, kwargs,
-		"name?", &name,
-		"image?", &image); err != nil {
+		"name?", &name); err != nil {
 		return starlark.None, fmt.Errorf("invalid constructor argument: %w", err)
 	}
 
@@ -64,9 +62,8 @@ func NewHost(th *starlark.Thread, _ *starlark.Builtin, args starlark.Tuple, kwar
 	}
 
 	return &netnode{
-		name:  name,
-		typ:   nodeHost,
-		image: image,
+		name: name,
+		typ:  nodeHost,
 	}, nil
 }
 
@@ -86,8 +83,7 @@ type netnode struct {
 	typ    int
 	frozen bool
 
-	image string
-	init  string
+	init string
 
 	ifcs []*netiface
 }
@@ -275,9 +271,8 @@ func (n *netnode) ToTemplate() TemplateNode {
 	}
 
 	t := TemplateNode{
-		Name:  n.name,
-		Image: n.image,
-		Host:  struct{ PubKey string }{string(pub)},
+		Name: n.name,
+		Host: struct{ PubKey string }{string(pub)},
 	}
 	for _, iface := range n.ifcs {
 		t.Interfaces = append(t.Interfaces, struct {
