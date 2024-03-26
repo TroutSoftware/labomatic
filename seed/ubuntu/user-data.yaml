@@ -3,4 +3,4 @@ password: "$1$thesault$nWDYzinFoHb2XX3vVy2St/"
 chpasswd: { expire: False }
 ssh_pwauth: True
 package_update: true
-packages: [qemu-guest-agent]
+packages: [qemu-guest-agent, inetutils-ping]
