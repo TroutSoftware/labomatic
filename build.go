@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/rand"
 	"fmt"
+	"iter"
 	"log/slog"
 	"net/netip"
 	"os"
@@ -162,12 +163,8 @@ func Build(nodes starlark.StringDict) error {
 
 	var errc int
 	// third pass: the VMs
-	for sname, node := range nodes {
-		node, ok := node.(*netnode)
-		if !ok {
-			continue
-		}
 
+	for node := range launchorder(nodes) {
 		taps := make(map[string]*os.File)
 		for i, iface := range node.ifcs {
 			if iface.net.user {
@@ -195,7 +192,7 @@ func Build(nodes starlark.StringDict) error {
 		}
 
 		// note this run in the same LockOSThread so that network namespace is kept
-		if err := RunVM(sname, node, taps); err != nil {
+		if err := RunVM(node, taps); err != nil {
 			errc++
 			fmt.Printf("\033[38;9;2m ⚠️   cannot create vm %s: %s\033[0m\n", node.name, err)
 		}
@@ -351,7 +348,7 @@ func init() {
 	signal.Notify(KillChan, os.Interrupt)
 }
 
-func RunVM(vname string, node *netnode, taps map[string]*os.File) error {
+func RunVM(node *netnode, taps map[string]*os.File) error {
 	var base string
 	switch node.typ {
 	default:
@@ -362,7 +359,7 @@ func RunVM(vname string, node *netnode, taps map[string]*os.File) error {
 		base = UbuntuImage
 	}
 
-	vst := filepath.Join(TmpDir, vname+".qcow2")
+	vst := filepath.Join(TmpDir, node.name+".qcow2")
 	err := exec.Command("/usr/bin/qemu-img", "create",
 		"-f", "qcow2", "-F", "qcow2",
 		"-b", base,
@@ -505,6 +502,39 @@ waitUp:
 		time.Sleep(2 * time.Second)
 	}
 	return fmt.Errorf("could not properly seed machine")
+}
+
+func launchorder(nodes starlark.StringDict) iter.Seq[*netnode] {
+	return func(yield func(*netnode) bool) {
+		order, ok := nodes["boot_order"]
+		if ok {
+			lo, ok := order.(*starlark.List)
+			if !ok {
+				panic("boot order must be a starlark list")
+			}
+			for n := range lo.Elements {
+				n, ok := n.(*netnode)
+				if !ok {
+					continue
+				}
+				if !yield(n) {
+					return
+				}
+			}
+		} else {
+			for _, node := range nodes {
+				node, ok := node.(*netnode)
+				if !ok {
+					continue
+				}
+				if !yield(node) {
+					return
+				}
+			}
+		}
+
+	}
+
 }
 
 func rndmac() string {
