@@ -231,6 +231,7 @@ func Build(nodes starlark.StringDict) error {
 				waitbooks.Done()
 			}()
 		}
+		waitbooks.Wait()
 		if len(playbooks) > 0 {
 			fmt.Printf("- Playbooks executed (%d fail)\n", errc.Load())
 		}
@@ -493,7 +494,7 @@ waitUp:
 				return nil
 			}
 			errdt := GuestExecStatus.ErrData
-			if errdt == nil {
+			if len(errdt) == 0 {
 				errdt = GuestExecStatus.OutData
 			}
 			return fmt.Errorf("Error running script: %s", errdt)
