@@ -14,7 +14,6 @@ var netCount = 1
 func NewSubnet(th *starlark.Thread, fn *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
 	var (
 		name    string
-		tag     int
 		network string
 		host    bool
 
@@ -23,7 +22,6 @@ func NewSubnet(th *starlark.Thread, fn *starlark.Builtin, args starlark.Tuple, k
 	if err := starlark.UnpackArgs("Subnet", args, kwargs,
 		"network", &network,
 		"name?", &name,
-		"tag?", &tag,
 		"host?", &host,
 		"dns_server?", &dns.Server, "dns_domain?", &dns.Domain); err != nil {
 		return starlark.None, fmt.Errorf("invalid constructor argument: %w", err)
@@ -48,7 +46,6 @@ func NewSubnet(th *starlark.Thread, fn *starlark.Builtin, args starlark.Tuple, k
 
 	return &subnet{
 		name:    name,
-		tag:     tag,
 		network: sub,
 		host:    host,
 		dns:     dns,
@@ -103,8 +100,6 @@ func NewIPVLAN(th *starlark.Thread, fn *starlark.Builtin, args starlark.Tuple, k
 type subnet struct {
 	name   string
 	frozen bool
-	// VLAN tag (currently not implemented)
-	tag int
 	// host is made available to the bridge, at the last network address
 	host bool
 	// use SPICE user-level network instead of a bridge
