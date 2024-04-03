@@ -1,0 +1,18 @@
+# nfpm example configuration file
+#
+# check https://nfpm.goreleaser.com/configuration for detailed usage
+#
+name: "labomatic"
+arch: "amd64"
+platform: "linux"
+version: "v0.5.0"
+section: "default"
+priority: "extra"
+maintainer: "Trout Software <devit@trout.software>"
+description: |
+  Labomatic for lab creation
+contents:
+- src: /var/lib/labomatic
+  dst: /var/lib/labomatic
+- src: ./labomatic
+  dst: /usr/bin/labomatic

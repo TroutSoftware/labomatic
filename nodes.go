@@ -254,9 +254,10 @@ type TemplateNode struct {
 
 	// List of network interfaces
 	Interfaces []struct {
-		Name    string
-		Address netip.Addr
-		Network netip.Prefix
+		Name     string
+		Address  netip.Addr
+		Network  netip.Prefix
+		LinkOnly bool
 	}
 
 	Host struct {
@@ -276,13 +277,15 @@ func (n *netnode) ToTemplate() TemplateNode {
 	}
 	for _, iface := range n.ifcs {
 		t.Interfaces = append(t.Interfaces, struct {
-			Name    string
-			Address netip.Addr
-			Network netip.Prefix
+			Name     string
+			Address  netip.Addr
+			Network  netip.Prefix
+			LinkOnly bool
 		}{
-			Name:    iface.name,
-			Address: netip.Addr(iface.addr),
-			Network: iface.net.network,
+			Name:     iface.name,
+			Address:  netip.Addr(iface.addr),
+			Network:  iface.net.network,
+			LinkOnly: iface.net.linkonly,
 		})
 	}
 	return t

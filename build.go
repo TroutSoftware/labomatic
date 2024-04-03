@@ -107,6 +107,10 @@ func Build(nodes starlark.StringDict) error {
 			}
 			err := addveth(parent, origns, veth,
 				func(l netlink.Link) error {
+					if net.linkonly {
+						return nil
+					}
+
 					na := netip.PrefixFrom(last(net.network), net.network.Bits()) // last address always assigned to host
 					addr, _ := netlink.ParseAddr(na.String())
 					return netlink.AddrAdd(l, addr)
@@ -361,11 +365,13 @@ func RunVM(node *netnode, taps map[string]*os.File) error {
 	}
 
 	vst := filepath.Join(TmpDir, node.name+".qcow2")
-	err := exec.Command("/usr/bin/qemu-img", "create",
+	out, err := exec.Command("/usr/bin/qemu-img", "create",
 		"-f", "qcow2", "-F", "qcow2",
 		"-b", base,
-		vst).Run()
+		vst).Output()
 	if err != nil {
+		slog.Debug("runnig command qemu-img",
+			"output", string(out))
 		return fmt.Errorf("creating disk: %w", err)
 	}
 
@@ -566,7 +572,7 @@ func (ubuntu) defaultInit() string {
 {{- if .Address.IsValid }}
 sudo ip addr add {{.Address}}/{{.Network.Bits}} dev {{.Name}}
 sudo ip link set {{.Name}} up
-{{- else }}
+{{- else if not .LinkOnly }}
 sudo dhclient {{.Name}}
 {{ end }}
 {{ end }}
@@ -590,7 +596,7 @@ func (chr) defaultInit() string {
 	return `{{ range .Interfaces }}
 {{ if .Address.IsValid }}
 /ip/address/add interface={{.Name}} address={{.Address}}/{{.Network.Bits}}
-{{ else }}
+{{ else if not .LinkOnly}}
 /ip/dhcp-client/add interface={{.Name}}
 {{ end }}
 {{ end }}

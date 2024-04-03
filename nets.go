@@ -13,18 +13,23 @@ var netCount = 1
 
 func NewSubnet(th *starlark.Thread, fn *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
 	var (
-		name    string
-		network string
-		host    bool
+		name     string
+		network  string
+		host     bool
+		linkonly bool
 
 		dns dnsConfig
 	)
 	if err := starlark.UnpackArgs("Subnet", args, kwargs,
-		"network", &network,
+		"network?", &network,
+		"link_only?", &linkonly,
 		"name?", &name,
 		"host?", &host,
 		"dns_server?", &dns.Server, "dns_domain?", &dns.Domain); err != nil {
 		return starlark.None, fmt.Errorf("invalid constructor argument: %w", err)
+	}
+	if network == "" && !linkonly {
+		return starlark.None, fmt.Errorf("no network address provided")
 	}
 
 	if name == "" {
@@ -33,7 +38,7 @@ func NewSubnet(th *starlark.Thread, fn *starlark.Builtin, args starlark.Tuple, k
 	}
 
 	sub, err := netip.ParsePrefix(network)
-	if err != nil {
+	if err != nil && !linkonly {
 		return starlark.None, fmt.Errorf("invalid network specification %s: %w", network, err)
 	}
 
@@ -45,10 +50,11 @@ func NewSubnet(th *starlark.Thread, fn *starlark.Builtin, args starlark.Tuple, k
 	}
 
 	return &subnet{
-		name:    name,
-		network: sub,
-		host:    host,
-		dns:     dns,
+		name:     name,
+		network:  sub,
+		host:     host,
+		dns:      dns,
+		linkonly: linkonly,
 	}, nil
 }
 
@@ -107,6 +113,9 @@ type subnet struct {
 	// attached networks
 	link string
 
+	// no addressing performed during set-up
+	linkonly bool
+
 	dns dnsConfig
 
 	network netip.Prefix
@@ -128,6 +137,7 @@ func (subnet) AttrNames() []string {
 		"dns_domain",
 		"dns_server",
 		"host",
+		"link_only",
 		"network",
 	}
 }
@@ -142,6 +152,8 @@ func (r *subnet) Attr(name string) (starlark.Value, error) {
 		return starlark.String(r.dns.Server), nil
 	case "host":
 		return starlark.Bool(r.host), nil
+	case "link_only":
+		return starlark.Bool(r.linkonly), nil
 	case "network":
 		return Prefix(r.network), nil
 	}
@@ -155,6 +167,10 @@ var getaddr = starlark.NewBuiltin("addr", func(thread *starlark.Thread, fn *star
 	if err := starlark.UnpackArgs("addr", args, kwargs, "num", &num); err != nil {
 		return starlark.None, err
 	}
+	if nn.linkonly {
+		return starlark.None, fmt.Errorf("network is link_only (does not allow addressing)")
+	}
+
 	if nn.host && num == 1<<(32-nn.network.Bits())-2 {
 		return starlark.None, errors.New("last address in host networks is always the host")
 	}
