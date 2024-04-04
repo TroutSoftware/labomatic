@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/rand"
+	"errors"
 	"fmt"
 	"iter"
 	"log/slog"
@@ -78,10 +79,10 @@ func Build(nodes starlark.StringDict) error {
 				Mode: netlink.IPVLAN_MODE_L2,
 			}
 			if err := addipvlan(parent, origns, net.link, ipv); err != nil {
-				return fmt.Errorf("creating network %s: %w", net.name, err)
+				return fmt.Errorf("creating network [link creation] %s: %w", net.name, err)
 			}
 			if err := lease4(context.Background(), ipv); err != nil {
-				return fmt.Errorf("creating network %s: %w", net.name, err)
+				return fmt.Errorf("creating network [DHCP lease] %s: %w", net.name, err)
 			}
 			continue
 		}
@@ -365,13 +366,15 @@ func RunVM(node *netnode, taps map[string]*os.File) error {
 	}
 
 	vst := filepath.Join(TmpDir, node.name+".qcow2")
-	out, err := exec.Command("/usr/bin/qemu-img", "create",
+	_, err := exec.Command("/usr/bin/qemu-img", "create",
 		"-f", "qcow2", "-F", "qcow2",
 		"-b", base,
 		vst).Output()
 	if err != nil {
-		slog.Debug("runnig command qemu-img",
-			"output", string(out))
+		var perr *exec.ExitError
+		if errors.As(err, &perr) {
+			fmt.Fprint(os.Stderr, perr.Stderr)
+		}
 		return fmt.Errorf("creating disk: %w", err)
 	}
 

@@ -14,6 +14,8 @@ import (
 	"github.com/vishvananda/netlink"
 )
 
+var clientIdentifier = []byte{0xff, 0xac, 0x4d, 0x1d, 0x0e, 0xbe, 0x5b, 0x44, 0x34}
+
 func lease4(ctx context.Context, iface netlink.Link) error {
 	mods := []nclient4.ClientOpt{
 		nclient4.WithTimeout(3 * time.Second),
@@ -27,9 +29,10 @@ func lease4(ctx context.Context, iface netlink.Link) error {
 	defer cl.Close()
 
 	// https://www.rfc-editor.org/rfc/rfc2132#section-9.14
+	nextID()
 	lease, err := cl.Request(ctx,
 		dhcpv4.WithRequestedOptions(dhcpv4.OptionSubnetMask),
-		dhcpv4.WithOption(dhcpv4.OptClientIdentifier([]byte{0xff, 0xac, 0x4d, 0x1d, 0x0e, 0xbe, 0x5b, 0x44, 0x34})),
+		dhcpv4.WithOption(dhcpv4.OptClientIdentifier(clientIdentifier)),
 	)
 	if err != nil {
 		return fmt.Errorf("cannot obtain lease: %w", err)
@@ -83,4 +86,16 @@ func WriteDNSSettings(ns []net.IP, sl []string, domain string) error {
 		rc.WriteString("\n")
 	}
 	return os.WriteFile("/etc/resolv.conf", rc.Bytes(), 0o644)
+}
+
+func nextID() {
+	lb := 8
+	for lb > 0 {
+		if clientIdentifier[lb] < 0xff {
+			clientIdentifier[lb]++
+			return
+		} else {
+			clientIdentifier[lb] = 0
+		}
+	}
 }

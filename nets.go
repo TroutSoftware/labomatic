@@ -75,8 +75,8 @@ func NewIPVLAN(th *starlark.Thread, fn *starlark.Builtin, args starlark.Tuple, k
 
 	if err := starlark.UnpackArgs("Outnet", args, kwargs,
 		"link", &link,
-		"name?", name,
-		"net?", network,
+		"name?", &name,
+		"net?", &network,
 	); err != nil {
 		return starlark.None, fmt.Errorf("invalid constructor: %w", err)
 	}
