@@ -13,10 +13,11 @@ import (
 )
 
 var NetBlocks = starlark.StringDict{
-	"Router": starlark.NewBuiltin("Router", NewRouter),
-	"Host":   starlark.NewBuiltin("Host", NewHost),
-	"Subnet": starlark.NewBuiltin("Subnet", NewSubnet),
-	"Outnet": starlark.NewBuiltin("Outnet", NewIPVLAN),
+	"Router":       starlark.NewBuiltin("Router", NewRouter),
+	"Host":         starlark.NewBuiltin("Host", NewHost),
+	"Subnet":       starlark.NewBuiltin("Subnet", NewSubnet),
+	"Outnet":       starlark.NewBuiltin("Outnet", NewIPVLAN),
+	"dhcp_options": dhcpOptions,
 }
 
 func NewRouter(th *starlark.Thread, _ *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
