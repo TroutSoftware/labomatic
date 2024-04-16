@@ -27,7 +27,11 @@ func main() {
 	}
 
 	var th starlark.Thread
-	cnf, err := starlark.ExecFileOptions(&syntax.FileOptions{}, &th, "conf.star", nil, labomatic.NetBlocks)
+	cnf, err := starlark.ExecFileOptions(&syntax.FileOptions{
+		TopLevelControl: true,
+		Set:             true,
+		GlobalReassign:  true,
+	}, &th, "conf.star", nil, labomatic.NetBlocks)
 	if err != nil {
 		log.Fatal(err)
 	}
