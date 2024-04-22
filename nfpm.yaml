@@ -16,3 +16,7 @@ contents:
   dst: /var/lib/labomatic
 - src: ./labomatic
   dst: /usr/bin/labomatic
+
+depends:
+  - qemu-system-x86
+  - nftables

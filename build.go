@@ -140,6 +140,10 @@ func Build(nodes starlark.StringDict) error {
 	}
 
 	if len(nated) > 0 {
+		revert, err := switchns(origns)
+		if err != nil {
+			return fmt.Errorf("cannot switch to main ns: %w", err)
+		}
 		if err := writeSysctl("/proc/sys/net/ipv4/ip_forward", "1"); err != nil {
 			return fmt.Errorf("cannot enable IP forwarding: %w", err)
 		}
@@ -152,10 +156,11 @@ func Build(nodes starlark.StringDict) error {
 			return fmt.Errorf("cannot execute rule, %w", err)
 		}
 		fh.Close()
+
 		if err := exec.Command("/usr/sbin/nft", "-f", fh.Name()).Run(); err != nil {
 			return fmt.Errorf("cannot configure masquerade: %w", err)
 		}
-		fmt.Println("executed nft against ", fh.Name())
+		revert()
 	}
 
 	fmt.Println("\033[38;5;2m- Internal networks created\033[0m")
@@ -291,12 +296,9 @@ func addveth(ns1 *netlink.Handle, ns2 netns.NsHandle, lk *netlink.Veth, cfg ...f
 	if err := netlink.LinkSetNsFd(peer, int(ns2)); err != nil {
 		return fmt.Errorf("cannot port host handle: %w", err)
 	}
-	ch, err := netns.Get()
-	if err != nil {
-		return fmt.Errorf("cannot get current handle")
-	}
 
-	if err := netns.Set(ns2); err != nil {
+	revert, err := switchns(ns2)
+	if err != nil {
 		return fmt.Errorf("cannot switch to host handle: %w", err)
 	}
 	peer, err = netlink.LinkByName(lk.PeerName)
@@ -313,7 +315,20 @@ func addveth(ns1 *netlink.Handle, ns2 netns.NsHandle, lk *netlink.Veth, cfg ...f
 		}
 	}
 
-	return netns.Set(ch)
+	return revert()
+}
+
+func switchns(ns netns.NsHandle) (revert func() error, err error) {
+	cns, err := netns.Get()
+	if err != nil {
+		return nil, fmt.Errorf("cannot get current handle")
+	}
+
+	if err := netns.Set(ns); err != nil {
+		return nil, fmt.Errorf("cannot switch to host handle: %w", err)
+	}
+
+	return func() error { return netns.Set(cns) }, nil
 }
 
 func writeSysctl(path string, value string) error {
@@ -562,7 +577,7 @@ func (chr) defaultInit() string {
 {{ if .Address.IsValid }}
 /ip/address/add interface={{.Name}} address={{.Address}}/{{.Network.Bits}}
 {{- if .NATed}}
-/ip/route/add destination=0.0.0.0/0 gateway="{{ last_adress .Network }}"
+/ip/route/add dst-address=0.0.0.0/0 gateway={{ last_address .Network }}
 /ip/dns/set servers=9.9.9.9,149.112.112.112
 {{ end }}
 {{ else if not .LinkOnly}}
