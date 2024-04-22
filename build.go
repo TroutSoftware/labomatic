@@ -2,11 +2,10 @@ package labomatic
 
 import (
 	"bytes"
-	"context"
 	"crypto/rand"
 	"errors"
 	"fmt"
-	"iter"
+	"io"
 	"log/slog"
 	"net/netip"
 	"os"
@@ -27,6 +26,24 @@ import (
 // TODO multi-labs:
 //  - set unique ns
 //  - persistence with names
+
+var masquerade_rule = template.Must(template.New("nft_masquerade").Parse(`
+table inet labomatic
+delete table inet labomatic
+
+table inet labomatic {
+	chain forward {
+		type filter hook forward priority filter; policy accept;
+		{{ range .Interfaces }}
+		iifname "{{.}}" counter meta mark set mark and 0xff00ffff xor 0x80000
+		{{ end }}
+	}
+	chain nat {
+		type nat hook postrouting priority srcnat; policy accept;
+		meta mark & 0x00ff0000 == 0x80000 counter masquerade
+	}
+}
+`))
 
 func Build(nodes starlark.StringDict) error {
 	runtime.LockOSThread()
@@ -64,29 +81,8 @@ func Build(nodes starlark.StringDict) error {
 	}
 
 	// first pass: the bridges
-	for _, node := range nodes {
-		net, ok := node.(*subnet)
-		if !ok {
-			continue
-		}
-
-		if net.user {
-			ipv := &netlink.IPVlan{
-				LinkAttrs: netlink.LinkAttrs{
-					Name:   net.name,
-					TxQLen: -1,
-				},
-				Mode: netlink.IPVLAN_MODE_L2,
-			}
-			if err := addipvlan(parent, origns, net.link, ipv); err != nil {
-				return fmt.Errorf("creating network [link creation] %s: %w", net.name, err)
-			}
-			if err := lease4(context.Background(), ipv); err != nil {
-				return fmt.Errorf("creating network [DHCP lease] %s: %w", net.name, err)
-			}
-			continue
-		}
-
+	var nated []string
+	for net := range netsof(nodes) {
 		br := &netlink.Bridge{
 			LinkAttrs: netlink.LinkAttrs{
 				Name:   net.name,
@@ -96,46 +92,70 @@ func Build(nodes starlark.StringDict) error {
 		if err := addup(parent, br); err != nil {
 			return fmt.Errorf("creating bridge: %w", err)
 		}
-		if net.host {
-			veth := &netlink.Veth{
-				LinkAttrs: netlink.LinkAttrs{
-					NetNsID:     1,
-					Name:        "veth_" + net.name,
-					TxQLen:      -1,
-					MasterIndex: br.Attrs().Index,
-				},
-				PeerName: "lab_" + net.name,
-			}
-			err := addveth(parent, origns, veth,
-				func(l netlink.Link) error {
-					if net.linkonly {
-						return nil
-					}
-
-					na := netip.PrefixFrom(last(net.network), net.network.Bits()) // last address always assigned to host
-					addr, _ := netlink.ParseAddr(na.String())
-					return netlink.AddrAdd(l, addr)
-				},
-				func(l netlink.Link) error {
-					if net.dns.Server == "" {
-						return nil
-					}
-					if err := exec.Command("/usr/bin/resolvectl", "dns", l.Attrs().Name, net.dns.Server).Run(); err != nil {
-						return fmt.Errorf("cannot configure dns server: %w", err)
-					}
-					if net.dns.Domain == "" {
-						return nil
-					}
-					if err := exec.Command("/usr/bin/resolvectl", "domain", l.Attrs().Name, net.dns.Domain).Run(); err != nil {
-						return fmt.Errorf("cannot configure dns domain: %w", err)
-					}
-					return nil
-				},
-			)
-			if err != nil {
-				return fmt.Errorf("cannot create host handle: %w", err)
-			}
+		if !net.host {
+			continue
 		}
+
+		veth := &netlink.Veth{
+			LinkAttrs: netlink.LinkAttrs{
+				NetNsID:     1,
+				Name:        "veth_" + net.name,
+				TxQLen:      -1,
+				MasterIndex: br.Attrs().Index,
+			},
+			PeerName: "lab_" + net.name,
+		}
+		err := addveth(parent, origns, veth,
+			func(l netlink.Link) error {
+				if net.linkonly {
+					return nil
+				}
+
+				na := netip.PrefixFrom(last(net.network), net.network.Bits()) // last address always assigned to host
+				addr, _ := netlink.ParseAddr(na.String())
+				return netlink.AddrAdd(l, addr)
+			},
+			func(l netlink.Link) error {
+				if net.dns.Server == "" {
+					return nil
+				}
+				if err := exec.Command("/usr/bin/resolvectl", "dns", l.Attrs().Name, net.dns.Server).Run(); err != nil {
+					return fmt.Errorf("cannot configure dns server: %w", err)
+				}
+				if net.dns.Domain == "" {
+					return nil
+				}
+				if err := exec.Command("/usr/bin/resolvectl", "domain", l.Attrs().Name, net.dns.Domain).Run(); err != nil {
+					return fmt.Errorf("cannot configure dns domain: %w", err)
+				}
+				return nil
+			},
+		)
+		if err != nil {
+			return fmt.Errorf("cannot create host handle: %w", err)
+		}
+		if net.nat {
+			nated = append(nated, "lab_"+net.name)
+		}
+	}
+
+	if len(nated) > 0 {
+		if err := writeSysctl("/proc/sys/net/ipv4/ip_forward", "1"); err != nil {
+			return fmt.Errorf("cannot enable IP forwarding: %w", err)
+		}
+
+		fh, err := os.CreateTemp("", "nft_add")
+		if err != nil {
+			return fmt.Errorf("cannot create temp file: %w", err)
+		}
+		if err := masquerade_rule.Execute(fh, struct{ Interfaces []string }{nated}); err != nil {
+			return fmt.Errorf("cannot execute rule, %w", err)
+		}
+		fh.Close()
+		if err := exec.Command("/usr/sbin/nft", "-f", fh.Name()).Run(); err != nil {
+			return fmt.Errorf("cannot configure masquerade: %w", err)
+		}
+		fmt.Println("executed nft against ", fh.Name())
 	}
 
 	fmt.Println("\033[38;5;2m- Internal networks created\033[0m")
@@ -169,13 +189,9 @@ func Build(nodes starlark.StringDict) error {
 	var errc int
 	// third pass: the VMs
 
-	for node := range launchorder(nodes) {
+	for node := range nodesof(nodes) {
 		taps := make(map[string]*os.File)
 		for i, iface := range node.ifcs {
-			if iface.net.user {
-				continue // not creating taps for those
-			}
-
 			br, err := parent.LinkByName(iface.net.name)
 			if err != nil {
 				return fmt.Errorf("cannot find parent bridge %s: %w", iface.net.name, err)
@@ -300,38 +316,17 @@ func addveth(ns1 *netlink.Handle, ns2 netns.NsHandle, lk *netlink.Veth, cfg ...f
 	return netns.Set(ch)
 }
 
-// addipvlan creates an IPVLAN device in ns1, based on parent from ns2
-func addipvlan(ns1 *netlink.Handle, ns2 netns.NsHandle, parent string, vl *netlink.IPVlan, cfg ...func(netlink.Link) error) error {
-	ch, err := netns.Get()
+func writeSysctl(path string, value string) error {
+	f, err := os.OpenFile(path, os.O_RDWR, 0644)
 	if err != nil {
-		return fmt.Errorf("cannot get current handle")
+		return fmt.Errorf("could not open the sysctl file %s: %s",
+			path, err)
 	}
-
-	if err := netns.Set(ns2); err != nil {
-		return fmt.Errorf("cannot switch to host handle: %w", err)
+	defer f.Close()
+	if _, err := io.WriteString(f, value); err != nil {
+		return fmt.Errorf("could not write to the systctl file %s: %s",
+			path, err)
 	}
-	pi, err := netlink.LinkByName(parent)
-	if err != nil {
-		return fmt.Errorf("invalid parent %s: %w", parent, err)
-	}
-
-	vl.ParentIndex = pi.Attrs().Index
-	if err := netlink.LinkAdd(vl); err != nil {
-		return fmt.Errorf("cannot create IPVLAN: %w", err)
-	}
-
-	if err := netlink.LinkSetNsFd(vl, int(ch)); err != nil {
-		return fmt.Errorf("cannot port host handle: %w", err)
-	}
-
-	if err := netns.Set(ch); err != nil {
-		return fmt.Errorf("cannot revert to original namespace: %w", err)
-	}
-
-	if err := netlink.LinkSetUp(vl); err != nil {
-		return fmt.Errorf("creating admin handle: %w", err)
-	}
-
 	return nil
 }
 
@@ -395,16 +390,10 @@ func RunVM(node *netnode, taps map[string]*os.File) error {
 	fmt.Printf("	Connect to \033[38;5;7m%s\033[0m using:    telnet 169.254.169.2 %d\n", node.name, TelnetNum)
 
 	const fdtap = 3 // since stderr / stdout / stdin are passed
-	for i, iface := range node.ifcs {
-		if iface.net.user {
-			args = append(args,
-				"-nic", fmt.Sprintf("user,ipv6=off,net=%s,model=virtio,mac=52:54:98:%s", iface.net.network, rndmac()),
-			)
-		} else {
-			args = append(args,
-				"-nic", fmt.Sprintf("tap,fd=%d,model=virtio,mac=52:54:00:%s", fdtap+i, rndmac()),
-			)
-		}
+	for i := range node.ifcs {
+		args = append(args,
+			"-nic", fmt.Sprintf("tap,fd=%d,model=virtio,mac=52:54:00:%s", fdtap+i, rndmac()),
+		)
 	}
 	cm := exec.Command("/usr/bin/qemu-system-x86_64", args...)
 	cm.Stderr = os.Stderr
@@ -459,7 +448,9 @@ waitUp:
 	}
 
 	iniscript := node.agent().defaultInit() + node.init
-	exp, err := template.New("init").Parse(iniscript)
+	exp, err := template.New("init").Funcs(template.FuncMap{
+		"last_address": last,
+	}).Parse(iniscript)
 	if err != nil {
 		return fmt.Errorf("invalid init script: %w", err)
 	}
@@ -514,39 +505,6 @@ waitUp:
 	return fmt.Errorf("could not properly seed machine")
 }
 
-func launchorder(nodes starlark.StringDict) iter.Seq[*netnode] {
-	return func(yield func(*netnode) bool) {
-		order, ok := nodes["boot_order"]
-		if ok {
-			lo, ok := order.(*starlark.List)
-			if !ok {
-				panic("boot order must be a starlark list")
-			}
-			for n := range lo.Elements {
-				n, ok := n.(*netnode)
-				if !ok {
-					continue
-				}
-				if !yield(n) {
-					return
-				}
-			}
-		} else {
-			for _, node := range nodes {
-				node, ok := node.(*netnode)
-				if !ok {
-					continue
-				}
-				if !yield(node) {
-					return
-				}
-			}
-		}
-
-	}
-
-}
-
 func rndmac() string {
 	mc := make([]byte, 3)
 	rand.Read(mc)
@@ -575,6 +533,10 @@ func (ubuntu) defaultInit() string {
 {{- if .Address.IsValid }}
 sudo ip addr add {{.Address}}/{{.Network.Bits}} dev {{.Name}}
 sudo ip link set {{.Name}} up
+{{- if .NATed}}
+sudo ip route add default dev {{ .Name }} via {{ last_address .Network }}
+sudo resolvectl dns {{ .Name }} 9.9.9.9
+{{ end }}
 {{- else if not .LinkOnly }}
 sudo dhclient {{.Name}}
 {{ end }}
@@ -599,6 +561,10 @@ func (chr) defaultInit() string {
 	return `{{ range .Interfaces }}
 {{ if .Address.IsValid }}
 /ip/address/add interface={{.Name}} address={{.Address}}/{{.Network.Bits}}
+{{- if .NATed}}
+/ip/route/add destination=0.0.0.0/0 gateway="{{ last_adress .Network }}"
+/ip/dns/set servers=9.9.9.9,149.112.112.112
+{{ end }}
 {{ else if not .LinkOnly}}
 /ip/dhcp-client/add interface={{.Name}}
 {{ end }}

@@ -4,7 +4,9 @@ import (
 	"errors"
 	"fmt"
 	"hash/maphash"
+	"iter"
 	"net/netip"
+	"slices"
 
 	"go.starlark.net/starlark"
 )
@@ -64,17 +66,15 @@ type dnsConfig struct {
 	Domain string
 }
 
-var defaultUserNet, _ = netip.ParsePrefix("10.0.2.0/24")
+var defaultUserNet, _ = netip.ParsePrefix("169.254.254.0/24")
 
-func NewIPVLAN(th *starlark.Thread, fn *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
+func NewNATLAN(th *starlark.Thread, fn *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
 	var (
 		name    string
-		link    string
 		network string
 	)
 
 	if err := starlark.UnpackArgs("Outnet", args, kwargs,
-		"link", &link,
 		"name?", &name,
 		"net?", &network,
 	); err != nil {
@@ -97,9 +97,9 @@ func NewIPVLAN(th *starlark.Thread, fn *starlark.Builtin, args starlark.Tuple, k
 
 	return &subnet{
 		name:    name,
-		user:    true,
-		link:    link,
+		nat:     true,
 		network: sub,
+		host:    true,
 	}, nil
 }
 
@@ -108,10 +108,9 @@ type subnet struct {
 	frozen bool
 	// host is made available to the bridge, at the last network address
 	host bool
-	// use SPICE user-level network instead of a bridge
-	user bool
-	// attached networks
-	link string
+
+	// NAT outbound queries for this subnet
+	nat bool
 
 	// no addressing performed during set-up
 	linkonly bool
@@ -193,4 +192,23 @@ func last(pf netip.Prefix) netip.Addr {
 	ui |= ^uint32(0) >> uint32(pf.Bits())
 	ui--
 	return netip.AddrFrom4([...]byte{byte(ui >> 24), byte(ui >> 16), byte(ui >> 8), byte(ui)})
+}
+
+// netsof returns an iterator over all networks attached to at least one configured VM
+func netsof(globals starlark.StringDict) iter.Seq[*subnet] {
+	var linkednets []*subnet
+	for n := range nodesof(globals) {
+		for _, ifc := range n.ifcs {
+			if !slices.Contains(linkednets, ifc.net) {
+				linkednets = append(linkednets, ifc.net)
+			}
+		}
+	}
+	return func(yield func(*subnet) bool) {
+		for _, n := range linkednets {
+			if !yield(n) {
+				return
+			}
+		}
+	}
 }

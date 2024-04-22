@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"hash/maphash"
+	"iter"
 	"net/netip"
 	"slices"
 	"strconv"
@@ -16,7 +17,7 @@ var NetBlocks = starlark.StringDict{
 	"Router":       starlark.NewBuiltin("Router", NewRouter),
 	"Host":         starlark.NewBuiltin("Host", NewHost),
 	"Subnet":       starlark.NewBuiltin("Subnet", NewSubnet),
-	"Outnet":       starlark.NewBuiltin("Outnet", NewIPVLAN),
+	"Outnet":       starlark.NewBuiltin("Outnet", NewNATLAN),
 	"dhcp_options": dhcpOptions,
 }
 
@@ -154,6 +155,9 @@ var attach_iface = starlark.NewBuiltin("attach_nic", func(thread *starlark.Threa
 	if len(nd.ifcs) == 9 {
 		return starlark.None, errors.New("only 9 interfaces can be added")
 	}
+	if net.nat && !netip.Addr(addr).IsValid() {
+		return starlark.None, errors.New("Outnet links must be statically addressed")
+	}
 
 	// numbering: interfaces start at 1 for localhost
 	var ifname string
@@ -246,6 +250,42 @@ func (r netiface) Attr(name string) (starlark.Value, error) {
 	}
 }
 
+// nodeof returns an iterator over the exported nodes in the configuration script.
+// if the well-known boot_order variable is set, then nodes are those in the list, in order.
+// if not, all nodes are provided, in random order
+func nodesof(globals starlark.StringDict) iter.Seq[*netnode] {
+	order, ok := globals["boot_order"]
+	if ok {
+		return func(yield func(*netnode) bool) {
+			lo, ok := order.(*starlark.List)
+			if !ok {
+				panic("boot order must be a starlark list")
+			}
+			for n := range lo.Elements {
+				n, ok := n.(*netnode)
+				if !ok {
+					continue
+				}
+				if !yield(n) {
+					return
+				}
+			}
+		}
+	} else {
+		return func(yield func(*netnode) bool) {
+			for _, node := range globals {
+				node, ok := node.(*netnode)
+				if !ok {
+					continue
+				}
+				if !yield(node) {
+					return
+				}
+			}
+		}
+	}
+}
+
 // TemplateNode is the data structure passed to node init templates.
 // Fields are populated from the initial Starlark configuration.
 type TemplateNode struct {
@@ -259,6 +299,7 @@ type TemplateNode struct {
 		Address  netip.Addr
 		Network  netip.Prefix
 		LinkOnly bool
+		NATed    bool
 	}
 
 	Host struct {
@@ -282,11 +323,13 @@ func (n *netnode) ToTemplate() TemplateNode {
 			Address  netip.Addr
 			Network  netip.Prefix
 			LinkOnly bool
+			NATed    bool
 		}{
 			Name:     iface.name,
 			Address:  netip.Addr(iface.addr),
 			Network:  iface.net.network,
 			LinkOnly: iface.net.linkonly,
+			NATed:    iface.net.nat,
 		})
 	}
 	return t
