@@ -19,6 +19,7 @@ var NetBlocks = starlark.StringDict{
 	"Subnet":       starlark.NewBuiltin("Subnet", NewSubnet),
 	"Outnet":       starlark.NewBuiltin("Outnet", NewNATLAN),
 	"dhcp_options": dhcpOptions,
+	"Addr":         starlark.NewBuiltin("Addr", NewAddr),
 }
 
 func NewRouter(th *starlark.Thread, _ *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {

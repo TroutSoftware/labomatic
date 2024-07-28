@@ -1,7 +1,8 @@
 # Simple router + 2 hosts lab
 
-datanet = Subnet(network="172.16.0.0/20")
-hostnet = Subnet(network="172.16.16.0/24", host=True)
+btx1 = Subnet(network="10.10.0.0/16")
+btx2 = Subnet(network="10.10.0.0/16", host=True)
+itco = Subnet(network="198.10.1.0/24")
 
 internet = Outnet()
 
@@ -20,5 +21,11 @@ add address=172.16.0/24 gateway=172.16.0.1 dns-server=172.16.0.1
 add address-pool=pool0 interface=ether2
 """
 
+r2 = Router("pfs2")
+r2.attach_nic(btx2, addr=btx2.addr(1))
+r2.attach_nic(itco, addr=itco.addr(2))
+r2.init_script = """
+/ip/address/add address=100.65.0.1/16 interface=ether2
+/ip/route/add gateway=198.10.1.1 dst-address=100.64.0.0/16
 
 d1 = Router("other")

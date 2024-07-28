@@ -175,6 +175,7 @@ var getaddr = starlark.NewBuiltin("addr", func(thread *starlark.Thread, fn *star
 	}
 
 	addr := nn.network.Addr()
+	// yurk
 	for range num {
 		addr = addr.Next()
 	}

@@ -11,6 +11,21 @@ import (
 // Addr exposes IP addresses to Starlark
 type Addr netip.Addr
 
+func NewAddr(th *starlark.Thread, _ *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
+	var (
+		addr string
+	)
+	if err := starlark.UnpackArgs("Router", args, kwargs,
+		"addr?", &addr); err != nil {
+		return starlark.None, fmt.Errorf("invalid constructor argument: %w", err)
+	}
+	rs, err := netip.ParseAddr(addr)
+	if err != nil {
+		return starlark.None, fmt.Errorf("invalid address %s: %w", addr, err)
+	}
+	return Addr(rs), nil
+}
+
 func (Addr) Freeze()                 {}
 func (r Addr) Hash() (uint32, error) { return uint32(maphash.String(hseed, r.String())), nil }
 func (r Addr) String() string        { return netip.Addr(r).String() }
