@@ -76,7 +76,7 @@ func NewNATLAN(th *starlark.Thread, fn *starlark.Builtin, args starlark.Tuple, k
 
 	if err := starlark.UnpackArgs("Outnet", args, kwargs,
 		"name?", &name,
-		"net?", &network,
+		"network?", &network,
 	); err != nil {
 		return starlark.None, fmt.Errorf("invalid constructor: %w", err)
 	}
