@@ -15,7 +15,6 @@ import (
 
 var NetBlocks = starlark.StringDict{
 	"Router":       starlark.NewBuiltin("Router", NewRouter),
-	"Host":         starlark.NewBuiltin("Host", NewHost),
 	"Subnet":       starlark.NewBuiltin("Subnet", NewSubnet),
 	"Outnet":       starlark.NewBuiltin("Outnet", NewNATLAN),
 	"dhcp_options": dhcpOptions,
@@ -45,39 +44,13 @@ func NewRouter(th *starlark.Thread, _ *starlark.Builtin, args starlark.Tuple, kw
 	}, nil
 }
 
-func NewHost(th *starlark.Thread, _ *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
-	var (
-		name string
-	)
-	if err := starlark.UnpackArgs("Host", args, kwargs,
-		"name?", &name); err != nil {
-		return starlark.None, fmt.Errorf("invalid constructor argument: %w", err)
-	}
-
-	if len(name) > 8 {
-		return starlark.None, fmt.Errorf("node names must be <8 characters")
-	}
-
-	if name == "" {
-		name = fmt.Sprintf("h%d", hostCount)
-		hostCount++
-	}
-
-	return &netnode{
-		name: name,
-		typ:  nodeHost,
-	}, nil
-}
-
 const (
 	nodeRouter = iota
-	nodeHost
 )
 
 // TODO check name conflict with user inputs or other modules (starlark threads)
 var (
 	routerCount = 1
-	hostCount   = 1
 )
 
 type netnode struct {
@@ -100,8 +73,6 @@ func (r netnode) String() string {
 		panic("invalid host")
 	case nodeRouter:
 		return "<router> " + r.name
-	case nodeHost:
-		return "<host> " + r.name
 	}
 }
 func (netnode) Truth() starlark.Bool { return true }
@@ -159,13 +130,11 @@ var attach_iface = starlark.NewBuiltin("attach_nic", func(thread *starlark.Threa
 		return starlark.None, errors.New("Outnet links must be statically addressed")
 	}
 
-	// numbering: interfaces start at 1 for localhost
+	// numbering: interfaces start at 1
 	var ifname string
 	switch nd.typ {
 	case nodeRouter:
-		ifname = fmt.Sprintf("ether%d", len(nd.ifcs)+2)
-	case nodeHost:
-		ifname = fmt.Sprintf("enp0s%d", len(nd.ifcs)+2)
+		ifname = fmt.Sprintf("ether%d", len(nd.ifcs)+1)
 	}
 
 	ifc := &netiface{name: ifname, host: nd, net: net, addr: addr}
@@ -207,8 +176,6 @@ func (r *netnode) agent() GuestAgent {
 	switch r.typ {
 	case nodeRouter:
 		return chr{}
-	case nodeHost:
-		return ubuntu{}
 	default:
 		panic("unknown node type")
 	}

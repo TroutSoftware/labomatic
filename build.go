@@ -243,7 +243,6 @@ func Build(nodes starlark.StringDict) error {
 			ans.Stderr = &bufout
 			ans.Stdout = &buferr
 
-			pb := pb // linter not happy, despite Go 1.22…
 			go func() {
 				time.Sleep(2 * time.Second) // wait for SSH to start
 				if err := ans.Run(); err != nil {
@@ -346,8 +345,7 @@ func writeSysctl(path string, value string) error {
 }
 
 var (
-	UbuntuImage   = "/var/lib/labomatic/ubuntu-22.04.qcow"
-	MikrotikImage = "/var/lib/labomatic/chr-7.14.qcow"
+	MikrotikImage = "/var/lib/labomatic/chr-7.15.3.qcow"
 
 	TmpDir string
 
@@ -371,8 +369,6 @@ func RunVM(node *netnode, taps map[string]*os.File) error {
 		panic("unknown node type")
 	case nodeRouter:
 		base = MikrotikImage
-	case nodeHost:
-		base = UbuntuImage
 	}
 
 	vst := filepath.Join(TmpDir, node.name+".qcow2")
@@ -393,7 +389,8 @@ func RunVM(node *netnode, taps map[string]*os.File) error {
 	args := []string{
 		"-machine", "accel=kvm,type=q35",
 		"-cpu", "host",
-		"-m", "2G",
+		"-m", "1024",
+		"-nodefaults",
 		"-nographic",
 		"-monitor", "none",
 		"-chardev", fmt.Sprintf("socket,id=ga0,host=127.0.10.1,port=%d,server=on,wait=off", TelnetNum),
@@ -441,13 +438,18 @@ func ExecGuest(portnum int, node *netnode) error {
 
 	// wait for interfaces to be up.
 	// note we expect the VM to have possibly more interfaces than the template (e.g lo)
+	tries := 5
 waitUp:
+	slog.Debug("wait for interfaces to be up",
+		"node", node.name,
+		"attempt", 6-tries)
 	wantnames := make(map[string]bool)
 	for _, iface := range dt.Interfaces {
 		wantnames[iface.Name] = true
 	}
 	var GuestNetworkInterface []struct {
-		Name string `json:"name"`
+		Name            string `json:"name"`
+		HardwareAddress string `json:"hardware-address"`
 	}
 	if err := qmp.Do("guest-network-get-interfaces", nil, &GuestNetworkInterface); err != nil {
 		return fmt.Errorf("listing interfaces: %w", err)
@@ -458,7 +460,10 @@ waitUp:
 	}
 
 	if len(wantnames) > 0 {
-		time.Sleep(2 * time.Second)
+		if tries--; tries == 0 {
+			return fmt.Errorf("timeout waiting for interfaces")
+		}
+		time.Sleep(2 * time.Second << (5 - tries))
 		goto waitUp
 	}
 
@@ -531,34 +536,6 @@ type GuestAgent interface {
 	Execute(data []byte) any
 	Path() string
 	defaultInit() string
-}
-
-type ubuntu struct{}
-
-func (q ubuntu) Execute(data []byte) any {
-	return struct {
-		Path          string `json:"path"`
-		InputData     []byte `json:"input-data"`
-		CaptureOutput bool   `json:"capture-output"`
-	}{"/bin/bash", data, true}
-}
-func (ubuntu) Path() string { return "org.qemu.guest_agent.0" }
-func (ubuntu) defaultInit() string {
-	return `{{ range .Interfaces }}
-{{- if .Address.IsValid }}
-sudo ip addr add {{.Address}}/{{.Network.Bits}} dev {{.Name}}
-sudo ip link set {{.Name}} up
-{{- if .NATed}}
-sudo ip route add default dev {{ .Name }} via {{ last_address .Network }}
-sudo resolvectl dns {{ .Name }} 9.9.9.9
-{{ end }}
-{{- else if not .LinkOnly }}
-sudo dhclient {{.Name}}
-{{ end }}
-{{ end }}
-sudo hostnamectl set-hostname {{.Name}}
-echo "{{.Host.PubKey}}" >> /home/ubuntu/.ssh/authorized_keys
-`
 }
 
 type chr struct{}

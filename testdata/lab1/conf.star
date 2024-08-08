@@ -3,16 +3,13 @@
 datanet = Subnet(network="172.16.0.0/20")
 hostnet = Subnet(network="172.16.16.0/24", host=True)
 
-internet = Outnet(link="wlp10s0")
+internet = Outnet()
 
 r1 = Router("mrt")
 r1.attach_nic(datanet, addr=datanet.addr(1))
 r1.attach_nic(hostnet, addr=hostnet.addr(2))
-r1.init_script = """
-{{ range .Interfaces }}
-/ip/address/add interface={{.Name}} address={{.Address}}/24
-{{ end }}
 
+r1.init_script = """
 /ip/pool
 add ranges=172.16.0.10-172.16.0.20
 
@@ -24,8 +21,4 @@ add address-pool=pool0 interface=ether2
 """
 
 
-d1 = Host()
-d1.attach_nic(internet)
-
-#d2 = Host()
-#d2.attach_nic(datanet)
+d1 = Router("other")
