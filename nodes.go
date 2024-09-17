@@ -15,6 +15,7 @@ import (
 
 var NetBlocks = starlark.StringDict{
 	"Router":       starlark.NewBuiltin("Router", NewRouter),
+	"CyberSwitch":  starlark.NewBuiltin("CyberSwitch", NewSwitch),
 	"Subnet":       starlark.NewBuiltin("Subnet", NewSubnet),
 	"Outnet":       starlark.NewBuiltin("Outnet", NewNATLAN),
 	"dhcp_options": dhcpOptions,
@@ -22,10 +23,13 @@ var NetBlocks = starlark.StringDict{
 
 func NewRouter(th *starlark.Thread, _ *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
 	var (
-		name string
+		name  string
+		image string
 	)
 	if err := starlark.UnpackArgs("Router", args, kwargs,
-		"name?", &name); err != nil {
+		"name?", &name,
+		"image?", &image,
+	); err != nil {
 		return starlark.None, fmt.Errorf("invalid constructor argument: %w", err)
 	}
 
@@ -39,13 +43,43 @@ func NewRouter(th *starlark.Thread, _ *starlark.Builtin, args starlark.Tuple, kw
 	}
 
 	return &netnode{
-		name: name,
-		typ:  nodeRouter,
+		name:  name,
+		typ:   nodeRouter,
+		image: image,
+	}, nil
+}
+
+func NewSwitch(th *starlark.Thread, _ *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
+	var (
+		name  string
+		image string
+	)
+	if err := starlark.UnpackArgs("CyberSwitch", args, kwargs,
+		"name?", &name,
+		"image?", &image); err != nil {
+		return starlark.None, fmt.Errorf("invalid constructor argument: %w", err)
+	}
+
+	if len(name) > 8 {
+		return starlark.None, fmt.Errorf("node names must be <8 characters")
+	}
+
+	if name == "" {
+		name = fmt.Sprintf("r%d", routerCount)
+		routerCount++
+	}
+
+	return &netnode{
+		name:  name,
+		typ:   nodeSwitch,
+		uefi:  true,
+		image: image,
 	}, nil
 }
 
 const (
 	nodeRouter = iota
+	nodeSwitch
 )
 
 // TODO check name conflict with user inputs or other modules (starlark threads)
@@ -57,6 +91,9 @@ type netnode struct {
 	name   string
 	typ    int
 	frozen bool
+
+	image string // image on disk
+	uefi  bool
 
 	init string
 
@@ -130,11 +167,14 @@ var attach_iface = starlark.NewBuiltin("attach_nic", func(thread *starlark.Threa
 		return starlark.None, errors.New("Outnet links must be statically addressed")
 	}
 
-	// numbering: interfaces start at 1
 	var ifname string
 	switch nd.typ {
+	case nodeSwitch:
+		const pciOffset = 0
+		ifname = fmt.Sprintf("eth%d", len(nd.ifcs))
 	case nodeRouter:
-		ifname = fmt.Sprintf("ether%d", len(nd.ifcs)+1)
+		const pciOffset = 2
+		ifname = fmt.Sprintf("ether%d", len(nd.ifcs)+pciOffset)
 	}
 
 	ifc := &netiface{name: ifname, host: nd, net: net, addr: addr}
@@ -176,6 +216,8 @@ func (r *netnode) agent() GuestAgent {
 	switch r.typ {
 	case nodeRouter:
 		return chr{}
+	case nodeSwitch:
+		return csw{}
 	default:
 		panic("unknown node type")
 	}
@@ -228,7 +270,7 @@ func nodesof(globals starlark.StringDict) iter.Seq[*netnode] {
 			if !ok {
 				panic("boot order must be a starlark list")
 			}
-			for n := range lo.Elements {
+			for n := range lo.Elements() {
 				n, ok := n.(*netnode)
 				if !ok {
 					continue

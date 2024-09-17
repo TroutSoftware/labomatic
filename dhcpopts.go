@@ -60,7 +60,7 @@ var calcopt121 = starlark.NewBuiltin("classless_routes", func(_ *starlark.Thread
 	}
 
 	var goroutes []string
-	for net, gw := range routes.Entries {
+	for net, gw := range routes.Entries() {
 		snet, ok := net.(starlark.String)
 		if !ok {
 			return starlark.None, fmt.Errorf("invalid subnet %s: it must be network/mask or default", net)

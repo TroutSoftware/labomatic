@@ -345,13 +345,13 @@ func writeSysctl(path string, value string) error {
 }
 
 var (
-	MikrotikImage = "/var/lib/labomatic/chr-7.15.3.qcow"
+	MikrotikImage = "/opt/labomatic/images/chr-7.15.3.qcow"
 
 	TmpDir string
 
 	// global variables, the script is not persistent…
 	VMS      []*exec.Cmd
-	KillChan = make(chan os.Signal)
+	KillChan = make(chan os.Signal, 1)
 
 	TelnetNum = 23 // standard telnet
 )
@@ -363,12 +363,18 @@ func init() {
 }
 
 func RunVM(node *netnode, taps map[string]*os.File) error {
-	var base string
-	switch node.typ {
-	default:
-		panic("unknown node type")
-	case nodeRouter:
-		base = MikrotikImage
+	base := node.image
+	if base == "" {
+		switch node.typ {
+		default:
+			panic("unknown node type")
+		case nodeRouter:
+			base = MikrotikImage
+		}
+	}
+	if !filepath.IsAbs(base) {
+		d := os.Getenv("TEST_ROOT")
+		base = filepath.Join(d, base)
 	}
 
 	vst := filepath.Join(TmpDir, node.name+".qcow2")
@@ -379,32 +385,38 @@ func RunVM(node *netnode, taps map[string]*os.File) error {
 	if err != nil {
 		var perr *exec.ExitError
 		if errors.As(err, &perr) {
-			fmt.Fprint(os.Stderr, perr.Stderr)
+			os.Stderr.Write(perr.Stderr)
 		}
 		return fmt.Errorf("creating disk: %w", err)
 	}
 
 	TelnetNum++
-	// TODO initialize cloudinit from templates
 	args := []string{
 		"-machine", "accel=kvm,type=q35",
 		"-cpu", "host",
-		"-m", "1024",
-		"-nodefaults",
+		"-m", "512",
 		"-nographic",
 		"-monitor", "none",
+		"-device", "virtio-rng-pci",
 		"-chardev", fmt.Sprintf("socket,id=ga0,host=127.0.10.1,port=%d,server=on,wait=off", TelnetNum),
 		"-device", "virtio-serial",
 		"-device", fmt.Sprintf("virtserialport,chardev=ga0,name=%s", node.agent().Path()),
 		"-serial", fmt.Sprintf("telnet:169.254.169.2:%d,server,wait=off,nodelay=on", TelnetNum),
-		"-drive", fmt.Sprintf("if=virtio,format=qcow2,file=%s", vst),
+		"-drive", fmt.Sprintf("format=qcow2,file=%s", vst),
 	}
+	if node.uefi {
+		args = append(args, "-drive", "if=pflash,format=raw,unit=0,readonly=on,file=/usr/share/ovmf/OVMF.fd")
+	}
+
 	fmt.Printf("	Connect to \033[38;5;7m%s\033[0m using:    telnet 169.254.169.2 %d\n", node.name, TelnetNum)
 
 	const fdtap = 3 // since stderr / stdout / stdin are passed
+	if len(node.ifcs) == 0 {
+		args = append(args, "-nic", "none")
+	}
 	for i := range node.ifcs {
 		args = append(args,
-			"-nic", fmt.Sprintf("tap,fd=%d,model=virtio,mac=52:54:00:%s", fdtap+i, rndmac()),
+			"-nic", fmt.Sprintf("tap,fd=%d,model=e1000,mac=52:54:00:%s", fdtap+i, rndmac()),
 		)
 	}
 	cm := exec.Command("/usr/bin/qemu-system-x86_64", args...)
@@ -423,15 +435,15 @@ func RunVM(node *netnode, taps map[string]*os.File) error {
 }
 
 func ExecGuest(portnum int, node *netnode) error {
-	time.Sleep(2 * time.Second) // give the VM some time to start
+	// we need to wait for QEMU to set up the agent socket before asking
+	// to early in the boot, and we never get an answer
+	// later, but still before the agent respond, and we need to spin sending messages, but the agent will replay them
+	// boot time show that the device is usually up in ~2 seconds
+	time.Sleep(10 * time.Second)
 
-	qmp, err := OpenQMP("lab", "tcp", fmt.Sprintf("127.0.10.1:%d", portnum))
+	qemuAgent, err := OpenQMP("lab", "tcp", fmt.Sprintf("127.0.10.1:%d", portnum))
 	if err != nil {
 		return fmt.Errorf("cannot contact qmp: %w", err)
-	}
-
-	if err := qmp.Do("guest-ping", nil, nil); err != nil {
-		return fmt.Errorf("cannot ping: %w", err)
 	}
 
 	dt := node.ToTemplate()
@@ -447,11 +459,12 @@ waitUp:
 	for _, iface := range dt.Interfaces {
 		wantnames[iface.Name] = true
 	}
+	fmt.Println("want interfaces", wantnames, "on port", portnum)
 	var GuestNetworkInterface []struct {
 		Name            string `json:"name"`
 		HardwareAddress string `json:"hardware-address"`
 	}
-	if err := qmp.Do("guest-network-get-interfaces", nil, &GuestNetworkInterface); err != nil {
+	if err := qemuAgent.Do("guest-network-get-interfaces", nil, &GuestNetworkInterface); err != nil {
 		return fmt.Errorf("listing interfaces: %w", err)
 	}
 
@@ -484,7 +497,7 @@ waitUp:
 	var execresult struct {
 		PID int `json:"pid"`
 	}
-	err = qmp.Do("guest-exec", node.agent().Execute(buf.Bytes()), &execresult)
+	err = qemuAgent.Do("guest-exec", node.agent().Execute(buf.Bytes()), &execresult)
 	if err != nil {
 		return fmt.Errorf("running provisioning script: %w", err)
 	}
@@ -497,11 +510,11 @@ waitUp:
 			OutData  []byte `json:"out-data"`
 			ErrData  []byte `json:"err-data"`
 		}
-		err := qmp.Do("guest-exec-status", struct {
+		err := qemuAgent.Do("guest-exec-status", struct {
 			PID int `json:"pid"`
 		}{execresult.PID}, &GuestExecStatus)
 		if err != nil {
-			return fmt.Errorf("canot exec status")
+			return fmt.Errorf("cannot read exec status: %w", err)
 		}
 
 		if GuestExecStatus.Exited {
@@ -562,5 +575,24 @@ func (chr) defaultInit() string {
 {{ end }}
 {{ end }}
 /system/identity/set name="{{.Name}}"
+`
+}
+
+type csw struct{}
+
+func (csw) Path() string { return "cyberos.provision_agent" }
+func (csw) Execute(data []byte) any {
+	return struct {
+		Name    string `json:"string"`
+		Content string `json:"content"`
+	}{"<script>", string(data)}
+}
+
+func (csw) defaultInit() string {
+	return `{{ range .Interfaces }}
+{{ if .Address.IsValid }}
+PUT netcfg /ip/address/add interface={{.Name}} address={{.Address}}/{{.Network.Bits}}
+{{ end }}
+{{ end }}
 `
 }
