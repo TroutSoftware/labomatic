@@ -345,7 +345,9 @@ func writeSysctl(path string, value string) error {
 }
 
 var (
-	MikrotikImage = "/opt/labomatic/images/chr-7.15.3.qcow"
+	ImagesDefaultLocation = "/opt/labomatic/images"
+	MikrotikImage         = "chr-7.15.3.qcow"
+	CyberOSImage          = "csw-2407.qcow"
 
 	TmpDir string
 
@@ -370,11 +372,12 @@ func RunVM(node *netnode, taps map[string]*os.File) error {
 			panic("unknown node type")
 		case nodeRouter:
 			base = MikrotikImage
+		case nodeSwitch:
+			base = CyberOSImage
 		}
 	}
 	if !filepath.IsAbs(base) {
-		d := os.Getenv("TEST_ROOT")
-		base = filepath.Join(d, base)
+		base = filepath.Join(ImagesDefaultLocation, base)
 	}
 
 	vst := filepath.Join(TmpDir, node.name+".qcow2")
@@ -439,7 +442,7 @@ func ExecGuest(portnum int, node *netnode) error {
 	// to early in the boot, and we never get an answer
 	// later, but still before the agent respond, and we need to spin sending messages, but the agent will replay them
 	// boot time show that the device is usually up in ~2 seconds
-	time.Sleep(10 * time.Second)
+	time.Sleep(1 * time.Second)
 
 	qemuAgent, err := OpenQMP("lab", "tcp", fmt.Sprintf("127.0.10.1:%d", portnum))
 	if err != nil {
@@ -459,7 +462,6 @@ waitUp:
 	for _, iface := range dt.Interfaces {
 		wantnames[iface.Name] = true
 	}
-	fmt.Println("want interfaces", wantnames, "on port", portnum)
 	var GuestNetworkInterface []struct {
 		Name            string `json:"name"`
 		HardwareAddress string `json:"hardware-address"`

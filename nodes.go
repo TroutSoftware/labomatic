@@ -174,7 +174,7 @@ var attach_iface = starlark.NewBuiltin("attach_nic", func(thread *starlark.Threa
 		const pciOffset = 0
 		ifname = fmt.Sprintf("eth%d", len(nd.ifcs))
 	case nodeRouter:
-		const pciOffset = 2
+		const pciOffset = 1 // but it might differ between laptops ???
 		ifname = fmt.Sprintf("ether%d", len(nd.ifcs)+pciOffset)
 	}
 

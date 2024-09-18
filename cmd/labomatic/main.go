@@ -14,6 +14,7 @@ import (
 func main() {
 	labdir := flag.String("d", "", "name of the lab setup directory")
 	verbose := flag.Bool("v", false, "show debug logs")
+	flag.StringVar(&labomatic.ImagesDefaultLocation, "images-dir", labomatic.ImagesDefaultLocation, "Default image location")
 	flag.Parse()
 
 	if *labdir != "" {
