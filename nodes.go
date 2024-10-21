@@ -20,6 +20,33 @@ var NetBlocks = starlark.StringDict{
 	"Outnet":       starlark.NewBuiltin("Outnet", NewNATLAN),
 	"dhcp_options": dhcpOptions,
 	"Addr":         starlark.NewBuiltin("Addr", NewAddr),
+	"Asset":        starlark.NewBuiltin("Asset", NewAsset),
+}
+
+func NewAsset(th *starlark.Thread, _ *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
+	var (
+		name string
+	)
+
+	if err := starlark.UnpackArgs("Asset", args, kwargs,
+		"name?", &name,
+	); err != nil {
+		return starlark.None, fmt.Errorf("invalid constructor argument: %w", err)
+	}
+
+	if len(name) > 8 {
+		return starlark.None, fmt.Errorf("node names must be <8 characters")
+	}
+
+	if name == "" {
+		name = fmt.Sprintf("pc%d", routerCount)
+		routerCount++
+	}
+
+	return &netnode{
+		name: name,
+		typ:  nodeAsset,
+	}, nil
 }
 
 func NewRouter(th *starlark.Thread, _ *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
@@ -81,6 +108,7 @@ func NewSwitch(th *starlark.Thread, _ *starlark.Builtin, args starlark.Tuple, kw
 const (
 	nodeRouter = iota
 	nodeSwitch
+	nodeAsset
 )
 
 // TODO check name conflict with user inputs or other modules (starlark threads)
@@ -111,6 +139,10 @@ func (r netnode) String() string {
 		panic("invalid host")
 	case nodeRouter:
 		return "<router> " + r.name
+	case nodeSwitch:
+		return "<switch> " + r.name
+	case nodeAsset:
+		return "<asset> " + r.name
 	}
 }
 func (netnode) Truth() starlark.Bool { return true }
@@ -273,7 +305,7 @@ func nodesof(globals starlark.StringDict) iter.Seq[*netnode] {
 			}
 			for n := range lo.Elements() {
 				n, ok := n.(*netnode)
-				if !ok {
+				if !ok || n.typ != nodeSwitch {
 					continue
 				}
 				if !yield(n) {

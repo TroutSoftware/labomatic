@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"iter"
 	"log/slog"
 	"net/netip"
 	"os"
@@ -13,8 +14,6 @@ import (
 	"os/signal"
 	"path/filepath"
 	"runtime"
-	"sync"
-	"sync/atomic"
 	"text/template"
 	"time"
 
@@ -225,40 +224,29 @@ func Build(nodes starlark.StringDict) error {
 	}
 	fmt.Printf("\033[38;5;2m- Virtual machines started (%d fail) \033[0m\n", errc)
 
-	// forth pass: ansible playbooks
+	// forth pass: the Assets
 	{
-		playbooks, _ := filepath.Glob("playbook_*.yaml")
-		if len(playbooks) > 0 {
-			fmt.Printf("- Starting %d playbooks\n", len(playbooks))
-		}
-
-		var errc atomic.Int32
-
-		var waitbooks sync.WaitGroup
-
-		for _, pb := range playbooks {
-			waitbooks.Add(1)
-			var bufout, buferr bytes.Buffer
-			ans := exec.Command("/usr/bin/ansible-playbook", "-i", "inventory", "--key-file", identity, pb)
-			ans.Stderr = &bufout
-			ans.Stdout = &buferr
-
-			go func() {
-				time.Sleep(2 * time.Second) // wait for SSH to start
-				if err := ans.Run(); err != nil {
-					fmt.Printf("\033[38;9;2m ⚠️   cannot run playbook %s: %s\033[0m\n", pb, err)
-					fmt.Println("[stdout]")
-					fmt.Println(bufout.String())
-					fmt.Println("[stderr]")
-					fmt.Println(buferr.String())
-					errc.Add(1)
+		for asset := range assetsof(nodes) {
+			for _, ifc := range asset.ifcs {
+				veth := &netlink.Veth{
+					LinkAttrs: netlink.LinkAttrs{
+						NetNsID:     1,
+						Name:        "veth_" + ifc.name,
+						TxQLen:      -1,
+						MasterIndex: 1,
+					},
+					PeerName: "lab_" + ifc.name,
 				}
-				waitbooks.Done()
-			}()
-		}
-		waitbooks.Wait()
-		if len(playbooks) > 0 {
-			fmt.Printf("- Playbooks executed (%d fail)\n", errc.Load())
+				err := addveth(parent, origns, veth, func(peer netlink.Link) error {
+					addr, _ := netlink.ParseAddr("192.168.1.1") // default route via 192.168.1.1 ???
+					return netlink.AddrAdd(peer, addr)
+				})
+
+				if err != nil {
+					return fmt.Errorf("cannot create host handle: %w", err)
+				}
+
+			}
 		}
 	}
 
@@ -268,6 +256,39 @@ func Build(nodes starlark.StringDict) error {
 	}
 
 	return netns.DeleteNamed("lab")
+}
+
+func assetsof(globals starlark.StringDict) iter.Seq[*netnode] {
+	order, ok := globals["boot_order"]
+	if ok {
+		return func(yield func(*netnode) bool) {
+			lo, ok := order.(*starlark.List)
+			if !ok {
+				panic("boot order must be a starlark list")
+			}
+			for n := range lo.Elements() {
+				n, ok := n.(*netnode)
+				if !ok || n.typ != nodeAsset {
+					continue
+				}
+				if !yield(n) {
+					return
+				}
+			}
+		}
+	} else {
+		return func(yield func(*netnode) bool) {
+			for _, node := range globals {
+				node, ok := node.(*netnode)
+				if !ok {
+					continue
+				}
+				if !yield(node) {
+					return
+				}
+			}
+		}
+	}
 }
 
 // add and set up
@@ -346,7 +367,7 @@ func writeSysctl(path string, value string) error {
 
 var (
 	ImagesDefaultLocation = "/opt/labomatic/images"
-	MikrotikImage         = "chr-7.15.3.qcow"
+	MikrotikImage         = "chr-7.16.qcow"
 	CyberOSImage          = "csw-2407.qcow"
 
 	TmpDir string
