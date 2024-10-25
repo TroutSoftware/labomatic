@@ -13,8 +13,6 @@ import (
 	"os/signal"
 	"path/filepath"
 	"runtime"
-	"sync"
-	"sync/atomic"
 	"text/template"
 	"time"
 
@@ -225,43 +223,6 @@ func Build(nodes starlark.StringDict) error {
 	}
 	fmt.Printf("\033[38;5;2m- Virtual machines started (%d fail) \033[0m\n", errc)
 
-	// forth pass: ansible playbooks
-	{
-		playbooks, _ := filepath.Glob("playbook_*.yaml")
-		if len(playbooks) > 0 {
-			fmt.Printf("- Starting %d playbooks\n", len(playbooks))
-		}
-
-		var errc atomic.Int32
-
-		var waitbooks sync.WaitGroup
-
-		for _, pb := range playbooks {
-			waitbooks.Add(1)
-			var bufout, buferr bytes.Buffer
-			ans := exec.Command("/usr/bin/ansible-playbook", "-i", "inventory", "--key-file", identity, pb)
-			ans.Stderr = &bufout
-			ans.Stdout = &buferr
-
-			go func() {
-				time.Sleep(2 * time.Second) // wait for SSH to start
-				if err := ans.Run(); err != nil {
-					fmt.Printf("\033[38;9;2m ⚠️   cannot run playbook %s: %s\033[0m\n", pb, err)
-					fmt.Println("[stdout]")
-					fmt.Println(bufout.String())
-					fmt.Println("[stderr]")
-					fmt.Println(buferr.String())
-					errc.Add(1)
-				}
-				waitbooks.Done()
-			}()
-		}
-		waitbooks.Wait()
-		if len(playbooks) > 0 {
-			fmt.Printf("- Playbooks executed (%d fail)\n", errc.Load())
-		}
-	}
-
 	<-KillChan
 	for _, p := range VMS {
 		p.Process.Kill()
@@ -346,7 +307,7 @@ func writeSysctl(path string, value string) error {
 
 var (
 	ImagesDefaultLocation = "/opt/labomatic/images"
-	MikrotikImage         = "chr-7.15.3.qcow"
+	MikrotikImage         = "chr-7.16.1.qcow"
 	CyberOSImage          = "csw-2407.qcow"
 
 	TmpDir string
@@ -377,7 +338,18 @@ func RunVM(node *netnode, taps map[string]*os.File) error {
 		}
 	}
 	if !filepath.IsAbs(base) {
-		base = filepath.Join(ImagesDefaultLocation, base)
+		wd, err := os.Getwd()
+		if err != nil {
+			return fmt.Errorf("cannot get current working dir: %w", err)
+		}
+		if _, err := os.Stat(filepath.Join(ImagesDefaultLocation, base)); err == nil {
+			base = filepath.Join(ImagesDefaultLocation, base)
+		} else if _, err := os.Stat(filepath.Join(wd, base)); err == nil {
+			base = filepath.Join(wd, base)
+		} else {
+			return fmt.Errorf("image %s cannot be found in default location [%s,%s]", base, ImagesDefaultLocation, wd)
+		}
+
 	}
 
 	vst := filepath.Join(TmpDir, node.name+".qcow2")
@@ -409,6 +381,9 @@ func RunVM(node *netnode, taps map[string]*os.File) error {
 	}
 	if node.uefi {
 		args = append(args, "-drive", "if=pflash,format=raw,unit=0,readonly=on,file=/usr/share/ovmf/OVMF.fd")
+	}
+	if node.media != "" {
+		args = append(args, "-drive", fmt.Sprintf("if=none,id=backup,format=raw,file=%s", node.media))
 	}
 
 	fmt.Printf("	Connect to \033[38;5;7m%s\033[0m using:    telnet 169.254.169.2 %d\n", node.name, TelnetNum)
@@ -443,6 +418,9 @@ func ExecGuest(portnum int, node *netnode) error {
 	// later, but still before the agent respond, and we need to spin sending messages, but the agent will replay them
 	// boot time show that the device is usually up in ~2 seconds
 	time.Sleep(1 * time.Second)
+	if node.typ == nodeSwitch {
+		return nil // TODO(rdo) build better
+	}
 
 	qemuAgent, err := OpenQMP("lab", "tcp", fmt.Sprintf("127.0.10.1:%d", portnum))
 	if err != nil {
@@ -466,7 +444,13 @@ waitUp:
 		Name            string `json:"name"`
 		HardwareAddress string `json:"hardware-address"`
 	}
-	if err := qemuAgent.Do("guest-network-get-interfaces", nil, &GuestNetworkInterface); err != nil {
+	if err := qemuAgent.Do("guest-network-get-interfaces", nil, &GuestNetworkInterface); errors.Is(err, os.ErrDeadlineExceeded) {
+		if tries--; tries == 0 {
+			return fmt.Errorf("timeout waiting for interfaces")
+		}
+		time.Sleep(2 * time.Second << (5 - tries))
+		goto waitUp
+	} else if err != nil {
 		return fmt.Errorf("listing interfaces: %w", err)
 	}
 
@@ -585,8 +569,8 @@ type csw struct{}
 func (csw) Path() string { return "cyberos.provision_agent" }
 func (csw) Execute(data []byte) any {
 	return struct {
-		Name    string `json:"string"`
-		Content string `json:"content"`
+		Path    string `json:"path"`
+		Content string `json:"input-data"`
 	}{"<script>", string(data)}
 }
 

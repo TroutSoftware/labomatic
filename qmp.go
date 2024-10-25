@@ -3,8 +3,11 @@ package labomatic
 import (
 	"encoding/json"
 	"fmt"
+	"io"
 	"net"
+	"os"
 	"runtime"
+	"time"
 
 	"github.com/vishvananda/netns"
 )
@@ -35,11 +38,15 @@ func OpenQMP(ns, ntw, addr string) (*QMP, error) {
 		return nil, fmt.Errorf("cannot contact QMP server %s: %w", addr, err)
 	}
 
-	return &QMP{
+	carbon, _ := os.CreateTemp("", "stream")
+	fmt.Println("created carbon copy", carbon.Name())
+
+	qmp := &QMP{
 		enc:  json.NewEncoder(sh),
-		dec:  json.NewDecoder(sh),
+		dec:  json.NewDecoder(io.TeeReader(sh, carbon)),
 		Conn: sh,
-	}, nil
+	}
+	return qmp, nil
 }
 
 func (q QMP) Do(cmd string, args, repl any) error {
@@ -48,6 +55,10 @@ func (q QMP) Do(cmd string, args, repl any) error {
 		Arguments any    `json:"arguments,omitempty"`
 	}{cmd, args}
 
+	// don’t block if we can’t access, better to let the caller retry
+	q.Conn.SetDeadline(time.Now().Add(8 * time.Second))
+	// no putting it without request to sync??
+	// q.Conn.Write([]byte{0xff})
 	q.enc.Encode(execreq)
 
 	var res struct {

@@ -54,10 +54,12 @@ func NewSwitch(th *starlark.Thread, _ *starlark.Builtin, args starlark.Tuple, kw
 	var (
 		name  string
 		image string
+		media string
 	)
 	if err := starlark.UnpackArgs("CyberSwitch", args, kwargs,
 		"name?", &name,
-		"image?", &image); err != nil {
+		"image?", &image,
+		"media?", &media); err != nil {
 		return starlark.None, fmt.Errorf("invalid constructor argument: %w", err)
 	}
 
@@ -75,6 +77,7 @@ func NewSwitch(th *starlark.Thread, _ *starlark.Builtin, args starlark.Tuple, kw
 		typ:   nodeSwitch,
 		uefi:  true,
 		image: image,
+		media: media,
 	}, nil
 }
 
@@ -95,6 +98,7 @@ type netnode struct {
 
 	image string // image on disk
 	uefi  bool
+	media string // additional disk
 
 	init string
 
@@ -168,13 +172,14 @@ var attach_iface = starlark.NewBuiltin("attach_nic", func(thread *starlark.Threa
 		return starlark.None, errors.New("Outnet links must be statically addressed")
 	}
 
+	// TODO use MAC address instead
 	var ifname string
 	switch nd.typ {
 	case nodeSwitch:
 		const pciOffset = 0
 		ifname = fmt.Sprintf("eth%d", len(nd.ifcs))
 	case nodeRouter:
-		const pciOffset = 1 // but it might differ between laptops ???
+		const pciOffset = 2 // but it might differ between laptops ???
 		ifname = fmt.Sprintf("ether%d", len(nd.ifcs)+pciOffset)
 	}
 

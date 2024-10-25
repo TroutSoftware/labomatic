@@ -5,6 +5,7 @@ import (
 	"log"
 	"log/slog"
 	"os"
+	"path/filepath"
 
 	"github.com/TroutSoftware/labomatic"
 	"go.starlark.net/starlark"
@@ -17,12 +18,6 @@ func main() {
 	flag.StringVar(&labomatic.ImagesDefaultLocation, "images-dir", labomatic.ImagesDefaultLocation, "Default image location")
 	flag.Parse()
 
-	if *labdir != "" {
-		if err := os.Chdir(*labdir); err != nil {
-			log.Fatalf("cannot chdir to %s: %s", *labdir, err)
-		}
-	}
-
 	if *verbose {
 		slog.SetDefault(slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelDebug})))
 	}
@@ -32,7 +27,7 @@ func main() {
 		TopLevelControl: true,
 		Set:             true,
 		GlobalReassign:  true,
-	}, &th, "conf.star", nil, labomatic.NetBlocks)
+	}, &th, filepath.Join(*labdir, "conf.star"), nil, labomatic.NetBlocks)
 	if err != nil {
 		log.Fatal(err)
 	}
