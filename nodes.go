@@ -16,6 +16,7 @@ import (
 var NetBlocks = starlark.StringDict{
 	"Router":       starlark.NewBuiltin("Router", NewRouter),
 	"CyberSwitch":  starlark.NewBuiltin("CyberSwitch", NewSwitch),
+	"Asset":        starlark.NewBuiltin("CyberSwitch", NewAsset),
 	"Subnet":       starlark.NewBuiltin("Subnet", NewSubnet),
 	"Outnet":       starlark.NewBuiltin("Outnet", NewNATLAN),
 	"dhcp_options": dhcpOptions,
@@ -81,14 +82,41 @@ func NewSwitch(th *starlark.Thread, _ *starlark.Builtin, args starlark.Tuple, kw
 	}, nil
 }
 
+func NewAsset(th *starlark.Thread, _ *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
+	var (
+		name string
+	)
+	if err := starlark.UnpackArgs("CyberSwitch", args, kwargs,
+		"name?", &name); err != nil {
+		return starlark.None, fmt.Errorf("invalid constructor argument: %w", err)
+	}
+
+	if len(name) > 8 {
+		return starlark.None, fmt.Errorf("node names must be <8 characters")
+	}
+
+	if name == "" {
+		name = fmt.Sprintf("a%d", assetCount)
+		assetCount++
+	}
+
+	return &netnode{
+		name: name,
+		typ:  nodeAsset,
+		uefi: true,
+	}, nil
+}
+
 const (
 	nodeRouter = iota
 	nodeSwitch
+	nodeAsset
 )
 
 // TODO check name conflict with user inputs or other modules (starlark threads)
 var (
 	routerCount = 1
+	assetCount  = 1
 )
 
 type netnode struct {
@@ -115,6 +143,10 @@ func (r netnode) String() string {
 		panic("invalid host")
 	case nodeRouter:
 		return "<router> " + r.name
+	case nodeSwitch:
+		return "<switch>" + r.name
+	case nodeAsset:
+		return "<asset>" + r.name
 	}
 }
 func (netnode) Truth() starlark.Bool { return true }
@@ -265,10 +297,12 @@ func (r netiface) Attr(name string) (starlark.Value, error) {
 	}
 }
 
+func OfType(t int) func(n *netnode) bool { return func(n *netnode) bool { return n.typ == t } }
+
 // nodeof returns an iterator over the exported nodes in the configuration script.
 // if the well-known boot_order variable is set, then nodes are those in the list, in order.
 // if not, all nodes are provided, in random order
-func nodesof(globals starlark.StringDict) iter.Seq[*netnode] {
+func nodesof(globals starlark.StringDict, filters ...func(*netnode) bool) iter.Seq[*netnode] {
 	order, ok := globals["boot_order"]
 	if ok {
 		return func(yield func(*netnode) bool) {
@@ -278,7 +312,7 @@ func nodesof(globals starlark.StringDict) iter.Seq[*netnode] {
 			}
 			for n := range lo.Elements() {
 				n, ok := n.(*netnode)
-				if !ok {
+				if !ok || nomatch(filters, n) {
 					continue
 				}
 				if !yield(n) {
@@ -289,16 +323,26 @@ func nodesof(globals starlark.StringDict) iter.Seq[*netnode] {
 	} else {
 		return func(yield func(*netnode) bool) {
 			for _, node := range globals {
-				node, ok := node.(*netnode)
-				if !ok {
+				n, ok := node.(*netnode)
+				if !ok || nomatch(filters, n) {
 					continue
 				}
-				if !yield(node) {
+				if !yield(n) {
 					return
 				}
 			}
 		}
 	}
+}
+
+func nomatch[T any](fs []func(T) bool, v T) bool {
+	for _, f := range fs {
+		if f(v) {
+			return false
+		}
+	}
+
+	return true
 }
 
 // TemplateNode is the data structure passed to node init templates.

@@ -198,7 +198,7 @@ func last(pf netip.Prefix) netip.Addr {
 // netsof returns an iterator over all networks attached to at least one configured VM
 func netsof(globals starlark.StringDict) iter.Seq[*subnet] {
 	var linkednets []*subnet
-	for n := range nodesof(globals) {
+	for n := range nodesof(globals, OfType(nodeRouter), OfType(nodeSwitch)) {
 		for _, ifc := range n.ifcs {
 			if !slices.Contains(linkednets, ifc.net) {
 				linkednets = append(linkednets, ifc.net)

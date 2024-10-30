@@ -3,9 +3,7 @@ package labomatic
 import (
 	"encoding/json"
 	"fmt"
-	"io"
 	"net"
-	"os"
 	"runtime"
 	"time"
 
@@ -38,12 +36,9 @@ func OpenQMP(ns, ntw, addr string) (*QMP, error) {
 		return nil, fmt.Errorf("cannot contact QMP server %s: %w", addr, err)
 	}
 
-	carbon, _ := os.CreateTemp("", "stream")
-	fmt.Println("created carbon copy", carbon.Name())
-
 	qmp := &QMP{
 		enc:  json.NewEncoder(sh),
-		dec:  json.NewDecoder(io.TeeReader(sh, carbon)),
+		dec:  json.NewDecoder(sh),
 		Conn: sh,
 	}
 	return qmp, nil

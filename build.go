@@ -47,33 +47,34 @@ func Build(nodes starlark.StringDict) error {
 	runtime.LockOSThread()
 	defer runtime.UnlockOSThread()
 
-	origns, err := netns.Get()
+	nsdefault, err := netns.Get()
 	if err != nil {
 		return fmt.Errorf("cannot get handle to existing namespace: %w", err)
 	}
 
-	ns, err := netns.NewNamed("lab")
+	nslab, err := netns.NewNamed("lab")
 	if err != nil {
 		return fmt.Errorf("cannot create namespace: %w", err)
-	}
-	parent, err := netlink.NewHandleAt(ns)
-	if err != nil {
-		return fmt.Errorf("cannot get ns handle: %w", err)
 	}
 
 	fmt.Println("\033[38;5;2mBuilding the Lab\033[0m")
 
 	{
-		lk, err := parent.LinkByName("lo")
+		lk, err := netlink.NewHandleAt(nslab)
+		if err != nil {
+			return fmt.Errorf("obtaining netlink handle: %w", err)
+		}
+
+		lo, err := lk.LinkByName("lo")
 		if err != nil {
 			return fmt.Errorf("no local interface in netns: %w", err)
 		}
 		addr, _ := netlink.ParseAddr("127.0.0.1/8")
-		if err := parent.AddrAdd(lk, addr); err != nil {
+		if err := lk.AddrAdd(lo, addr); err != nil {
 			return fmt.Errorf("cannot set loopback interface: %w", err)
 		}
 
-		if err := netlink.LinkSetUp(lk); err != nil {
+		if err := netlink.LinkSetUp(lo); err != nil {
 			return fmt.Errorf("cannot start lo: %w", err)
 		}
 	}
@@ -87,7 +88,7 @@ func Build(nodes starlark.StringDict) error {
 				TxQLen: -1,
 			},
 		}
-		if err := addup(parent, br); err != nil {
+		if err := addup(nslab, br); err != nil {
 			return fmt.Errorf("creating bridge: %w", err)
 		}
 		if !net.host {
@@ -103,7 +104,7 @@ func Build(nodes starlark.StringDict) error {
 			},
 			PeerName: "lab_" + net.name,
 		}
-		err := addveth(parent, origns, veth,
+		err := addveth(nslab, nsdefault, veth,
 			func(l netlink.Link) error {
 				if net.linkonly {
 					return nil
@@ -138,7 +139,7 @@ func Build(nodes starlark.StringDict) error {
 	}
 
 	if len(nated) > 0 {
-		revert, err := switchns(origns)
+		revert, err := switchns(nsdefault)
 		if err != nil {
 			return fmt.Errorf("cannot switch to main ns: %w", err)
 		}
@@ -173,7 +174,7 @@ func Build(nodes starlark.StringDict) error {
 			},
 			PeerName: "admin",
 		}
-		err := addveth(parent, origns, veth, func(peer netlink.Link) error {
+		err := addveth(nslab, nsdefault, veth, func(peer netlink.Link) error {
 			addr, _ := netlink.ParseAddr("169.254.169.1/30")
 			return netlink.AddrAdd(peer, addr)
 		})
@@ -192,10 +193,15 @@ func Build(nodes starlark.StringDict) error {
 	var errc int
 	// third pass: the VMs
 
-	for node := range nodesof(nodes) {
+	for node := range nodesof(nodes, OfType(nodeRouter), OfType(nodeSwitch)) {
 		taps := make(map[string]*os.File)
 		for i, iface := range node.ifcs {
-			br, err := parent.LinkByName(iface.net.name)
+			lk, err := netlink.NewHandleAt(nslab)
+			if err != nil {
+				return fmt.Errorf("obtaining netlink handle: %w", err)
+			}
+
+			br, err := lk.LinkByName(iface.net.name)
 			if err != nil {
 				return fmt.Errorf("cannot find parent bridge %s: %w", iface.net.name, err)
 			}
@@ -209,7 +215,7 @@ func Build(nodes starlark.StringDict) error {
 				Mode:   netlink.TUNTAP_MODE_TAP,
 				Queues: 1,
 			}
-			if err := addup(parent, tt); err != nil {
+			if err := addup(nslab, tt); err != nil {
 				return fmt.Errorf("creating tap device %w", err)
 			}
 			taps[iface.name] = tt.Fds[0] // one queue
@@ -223,20 +229,73 @@ func Build(nodes starlark.StringDict) error {
 	}
 	fmt.Printf("\033[38;5;2m- Virtual machines started (%d fail) \033[0m\n", errc)
 
+	// fourth pass: the assets
+	for node := range nodesof(nodes, OfType(nodeAsset)) {
+		ns, err := netns.NewNamed(node.name)
+		if err != nil {
+			return fmt.Errorf("cannot create namespace: %w", err)
+		}
+
+		for i, iface := range node.ifcs {
+			veth := &netlink.Veth{
+				LinkAttrs: netlink.LinkAttrs{
+					NetNsID: 1,
+					Name:    fmt.Sprintf("eth%d", i),
+					TxQLen:  -1,
+				},
+				PeerName: "ve_" + node.name,
+			}
+			err := addveth(ns, nslab, veth, func(peer netlink.Link) error {
+				mstr, err := netlink.LinkByName(iface.net.name)
+				if err != nil {
+					return fmt.Errorf("joining network %s: %w", iface.net.name, err)
+				}
+				return netlink.LinkSetMaster(peer, mstr)
+			})
+			if err != nil {
+				return fmt.Errorf("cannot joing network: %w", err)
+			}
+
+			if iface.addr.IsValid() {
+				addr, _ := netlink.ParseAddr(iface.addr.String())
+				if err := netlink.AddrAdd(veth, addr); err != nil {
+					return fmt.Errorf("assigning address %s: %w", iface.addr, err)
+				}
+			}
+
+			fmt.Printf("	Connect to \033[38;5;7m%s\033[0m using:    ip netns exec %s bash\n", node.name, node.name)
+
+		}
+	}
+	fmt.Printf("\033[38;5;2m- Assets namespaces started \033[0m\n")
+
 	<-KillChan
 	for _, p := range VMS {
 		p.Process.Kill()
 	}
 
-	return netns.DeleteNamed("lab")
+	{
+		err := netns.DeleteNamed("lab")
+		for node := range nodesof(nodes, OfType(nodeAsset)) {
+			err = errors.Join(err, netns.DeleteNamed(node.name))
+		}
+		if err != nil {
+			return fmt.Errorf("deleting lab: %w", err)
+		}
+	}
+	return nil
 }
 
 // add and set up
-func addup(parent *netlink.Handle, lk netlink.Link) error {
-	if err := parent.LinkAdd(lk); err != nil {
+func addup(parent netns.NsHandle, lk netlink.Link) error {
+	link, err := netlink.NewHandleAt(parent)
+	if err != nil {
+		return fmt.Errorf("opening namespace: %w", err)
+	}
+	if err := link.LinkAdd(lk); err != nil {
 		return fmt.Errorf("cannot create device %s: %w", lk.Attrs().Name, err)
 	}
-	if err := parent.LinkSetUp(lk); err != nil {
+	if err := link.LinkSetUp(lk); err != nil {
 		return fmt.Errorf("cannot start interface %s: %w", lk.Attrs().Name, err)
 	}
 	return nil
@@ -244,7 +303,7 @@ func addup(parent *netlink.Handle, lk netlink.Link) error {
 
 // addveth sets up a veth device in ns1, with lk.Peer in ns2.
 // configurations applied to the link after it gets moved to the new namespace.
-func addveth(ns1 *netlink.Handle, ns2 netns.NsHandle, lk *netlink.Veth, cfg ...func(netlink.Link) error) error {
+func addveth(ns1, ns2 netns.NsHandle, lk *netlink.Veth, cfg ...func(netlink.Link) error) error {
 	if err := addup(ns1, lk); err != nil {
 		return fmt.Errorf("creating host handle: %w", err)
 	}
@@ -426,6 +485,7 @@ func ExecGuest(portnum int, node *netnode) error {
 	if err != nil {
 		return fmt.Errorf("cannot contact qmp: %w", err)
 	}
+	defer qemuAgent.Close()
 
 	dt := node.ToTemplate()
 
