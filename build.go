@@ -257,7 +257,10 @@ func Build(nodes starlark.StringDict) error {
 			}
 
 			if iface.addr.IsValid() {
-				addr, _ := netlink.ParseAddr(iface.addr.String())
+				addr, err := netlink.ParseAddr(netip.PrefixFrom(iface.addr.Addr(), iface.net.network.Bits()).String())
+				if err != nil {
+					return fmt.Errorf("invalid interface address %s: %w", iface.addr, err)
+				}
 				if err := netlink.AddrAdd(veth, addr); err != nil {
 					return fmt.Errorf("assigning address %s: %w", iface.addr, err)
 				}

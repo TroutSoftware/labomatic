@@ -32,7 +32,8 @@ func (r Addr) String() string        { return netip.Addr(r).String() }
 func (r Addr) Truth() starlark.Bool  { return starlark.Bool(netip.Addr(r).IsValid()) }
 func (Addr) Type() string            { return "Addr" }
 
-func (a Addr) IsValid() bool { return netip.Addr(a).IsValid() }
+func (a Addr) IsValid() bool    { return netip.Addr(a).IsValid() }
+func (a Addr) Addr() netip.Addr { return netip.Addr(a) }
 
 type Mac uint32 // last 3 bytes of self-assigned range
 
