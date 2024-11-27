@@ -308,7 +308,7 @@ func nodesof(globals starlark.StringDict, filters ...func(*netnode) bool) iter.S
 		return func(yield func(*netnode) bool) {
 			lo, ok := order.(*starlark.List)
 			if !ok {
-				panic("boot order must be a starlark list")
+
 			}
 			for n := range lo.Elements() {
 				n, ok := n.(*netnode)

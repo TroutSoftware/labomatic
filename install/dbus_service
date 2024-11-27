@@ -1,0 +1,5 @@
+[D-BUS Service]
+Name=software.trout.labomatic
+Exec=/bin/false
+User=root
+SystemdService=dbus-software.trout.labomatic.service

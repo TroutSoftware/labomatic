@@ -1,7 +1,7 @@
-# nfpm example configuration file
+# Simple NFPM file
 #
-# check https://nfpm.goreleaser.com/configuration for detailed usage
-#
+# Templating is currently not working for the version, check if we can automate this
+
 name: "labomatic"
 arch: "amd64"
 platform: "linux"
@@ -12,10 +12,11 @@ maintainer: "Trout Software <devit@trout.software>"
 description: |
   Labomatic for lab creation
 contents:
-- src: /var/lib/labomatic
-  dst: /var/lib/labomatic
-- src: ./labomatic
-  dst: /usr/bin/labomatic
+ - src: build/routeros.img
+   dst: /var/lib/labomatic/routeros.img
+
+ - src: build/labd
+   dst: /usr/lib/labomatic/labd
 
 depends:
   - qemu-system-x86

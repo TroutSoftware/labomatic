@@ -3,6 +3,7 @@ module github.com/TroutSoftware/labomatic
 go 1.23
 
 require (
+	github.com/godbus/dbus/v5 v5.1.0
 	github.com/insomniacslk/dhcp v0.0.0-20240829085014-a3a4c1f04475
 	github.com/vishvananda/netlink v1.3.0
 	github.com/vishvananda/netns v0.0.4

@@ -1,0 +1,37 @@
+[Unit]
+Description=Automated lab creation solution
+Documentation=man:labd(8)
+#ConditionPathIsDirectory=/var/lib/labomatic
+
+[Service]
+Type=dbus
+BusName=trout.software.labomatic
+ExecStart=/opt/labomatic/bin/labd
+NotifyAccess=main
+#WatchdogSec=10
+Restart=on-failure
+CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_BIND_SERVICE
+
+# Filesystem lockdown
+ProtectHome=true
+ProtectSystem=strict
+PrivateTmp=true
+ProtectKernelTunables=true
+ProtectControlGroups=true
+StateDirectory=labomatic
+StateDirectoryMode=0700
+#ConfigurationDirectory=labomatic
+#ConfigurationDirectoryMode=0555
+
+# Execute Mappings
+MemoryDenyWriteExecute=true
+
+# Privilege escalation
+NoNewPrivileges=true
+
+# Real-time
+RestrictRealtime=true
+
+[Install]
+WantedBy=bluetooth.target
+Alias=dbus-org.bluez.service

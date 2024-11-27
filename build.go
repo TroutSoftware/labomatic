@@ -10,7 +10,6 @@ import (
 	"net/netip"
 	"os"
 	"os/exec"
-	"os/signal"
 	"path/filepath"
 	"runtime"
 	"text/template"
@@ -43,7 +42,10 @@ table inet labomatic {
 }
 `))
 
-func Build(nodes starlark.StringDict) error {
+// Build creates the full virtual lab from the Starlark definitions.
+// Read status from msg to follow progress (or have a goroutine ignore all messages if not intersted).
+// The term channel can be closed to terminate all current instances.
+func Build(nodes starlark.StringDict, msg chan<- string, term <-chan struct{}) error {
 	runtime.LockOSThread()
 	defer runtime.UnlockOSThread()
 
@@ -57,7 +59,7 @@ func Build(nodes starlark.StringDict) error {
 		return fmt.Errorf("cannot create namespace: %w", err)
 	}
 
-	fmt.Println("\033[38;5;2mBuilding the Lab\033[0m")
+	msg <- "<I>Building the Lab"
 
 	{
 		lk, err := netlink.NewHandleAt(nslab)
@@ -162,7 +164,7 @@ func Build(nodes starlark.StringDict) error {
 		revert()
 	}
 
-	fmt.Println("\033[38;5;2m- Internal networks created\033[0m")
+	msg <- "<I>Internal networks created"
 
 	// second pass: serial access
 	{
@@ -188,7 +190,7 @@ func Build(nodes starlark.StringDict) error {
 		}
 
 	}
-	fmt.Println("\033[38;5;2m- Serial over Telnet available\033[0m")
+	msg <- "<I>Serial over Telnet available"
 
 	var errc int
 	// third pass: the VMs
@@ -224,10 +226,10 @@ func Build(nodes starlark.StringDict) error {
 		// note this run in the same LockOSThread so that network namespace is kept
 		if err := RunVM(node, taps); err != nil {
 			errc++
-			fmt.Printf("\033[38;9;2m ⚠️   cannot create vm %s: %s\033[0m\n", node.name, err)
+			msg <- fmt.Sprintf("<E>cannot create vm %s: %s", node.name, err)
 		}
 	}
-	fmt.Printf("\033[38;5;2m- Virtual machines started (%d fail) \033[0m\n", errc)
+	msg <- fmt.Sprintf("<E>Virtual machines started (%d failed)", errc)
 
 	// fourth pass: the assets
 	for node := range nodesof(nodes, OfType(nodeAsset)) {
@@ -266,13 +268,13 @@ func Build(nodes starlark.StringDict) error {
 				}
 			}
 
-			fmt.Printf("	Connect to \033[38;5;7m%s\033[0m using:    ip netns exec %s bash\n", node.name, node.name)
+			msg <- fmt.Sprintf("<I>Connect to %s using: ip netns exec %s bash", node.name, node.name)
 
 		}
 	}
-	fmt.Printf("\033[38;5;2m- Assets namespaces started \033[0m\n")
+	msg <- ("<I>Assets namespaces started")
 
-	<-KillChan
+	<-term
 	for _, p := range VMS {
 		p.Process.Kill()
 	}
@@ -375,16 +377,13 @@ var (
 	TmpDir string
 
 	// global variables, the script is not persistent…
-	VMS      []*exec.Cmd
-	KillChan = make(chan os.Signal, 1)
+	VMS []*exec.Cmd
 
 	TelnetNum = 23 // standard telnet
 )
 
 func init() {
 	TmpDir, _ = os.MkdirTemp("", "labomatic_")
-
-	signal.Notify(KillChan, os.Interrupt)
 }
 
 func RunVM(node *netnode, taps map[string]*os.File) error {
