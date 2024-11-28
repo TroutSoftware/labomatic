@@ -6,6 +6,7 @@ import (
 	"hash/maphash"
 	"iter"
 	"net/netip"
+	"path/filepath"
 	"slices"
 	"strconv"
 	"strings"
@@ -25,29 +26,25 @@ var NetBlocks = starlark.StringDict{
 
 func NewRouter(th *starlark.Thread, _ *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
 	var (
-		name  string
-		image string
+		name string
 	)
 	if err := starlark.UnpackArgs("Router", args, kwargs,
 		"name?", &name,
-		"image?", &image,
 	); err != nil {
 		return starlark.None, fmt.Errorf("invalid constructor argument: %w", err)
 	}
 
-	if len(name) > 8 {
+	switch {
+	case len(name) > 8:
 		return starlark.None, fmt.Errorf("node names must be <8 characters")
-	}
-
-	if name == "" {
+	case name == "":
 		name = fmt.Sprintf("r%d", routerCount)
 		routerCount++
 	}
 
 	return &netnode{
-		name:  name,
-		typ:   nodeRouter,
-		image: image,
+		name: name,
+		typ:  nodeRouter,
 	}, nil
 }
 
@@ -64,13 +61,17 @@ func NewSwitch(th *starlark.Thread, _ *starlark.Builtin, args starlark.Tuple, kw
 		return starlark.None, fmt.Errorf("invalid constructor argument: %w", err)
 	}
 
-	if len(name) > 8 {
+	switch {
+	case len(name) > 8:
 		return starlark.None, fmt.Errorf("node names must be <8 characters")
-	}
-
-	if name == "" {
+	case name == "":
 		name = fmt.Sprintf("r%d", routerCount)
 		routerCount++
+	}
+
+	if !filepath.IsAbs(image) {
+		wd := th.Local("workdir").(string)
+		image = filepath.Join(wd, image)
 	}
 
 	return &netnode{

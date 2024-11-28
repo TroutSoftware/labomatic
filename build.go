@@ -45,7 +45,7 @@ table inet labomatic {
 // Build creates the full virtual lab from the Starlark definitions.
 // Read status from msg to follow progress (or have a goroutine ignore all messages if not intersted).
 // The term channel can be closed to terminate all current instances.
-func Build(nodes starlark.StringDict, msg chan<- string, term <-chan struct{}) error {
+func Build(nodes starlark.StringDict, msg chan<- string, ready chan chan Controller) error {
 	runtime.LockOSThread()
 	defer runtime.UnlockOSThread()
 
@@ -192,8 +192,9 @@ func Build(nodes starlark.StringDict, msg chan<- string, term <-chan struct{}) e
 	}
 	msg <- "<I>Serial over Telnet available"
 
-	var errc int
 	// third pass: the VMs
+	var errc int
+	var VMS []VMNode
 
 	for node := range nodesof(nodes, OfType(nodeRouter), OfType(nodeSwitch)) {
 		taps := make(map[string]*os.File)
@@ -224,12 +225,16 @@ func Build(nodes starlark.StringDict, msg chan<- string, term <-chan struct{}) e
 		}
 
 		// note this run in the same LockOSThread so that network namespace is kept
-		if err := RunVM(node, taps); err != nil {
+		cm, err := RunVM(node, taps)
+		if cm != nil {
+			VMS = append(VMS, VMNode{node: node, cmd: cm})
+		}
+		if err != nil {
 			errc++
 			msg <- fmt.Sprintf("<E>cannot create vm %s: %s", node.name, err)
 		}
 	}
-	msg <- fmt.Sprintf("<E>Virtual machines started (%d failed)", errc)
+	msg <- fmt.Sprintf("<I>Virtual machines started (%d failed)", errc)
 
 	// fourth pass: the assets
 	for node := range nodesof(nodes, OfType(nodeAsset)) {
@@ -274,20 +279,32 @@ func Build(nodes starlark.StringDict, msg chan<- string, term <-chan struct{}) e
 	}
 	msg <- ("<I>Assets namespaces started")
 
-	<-term
-	for _, p := range VMS {
-		p.Process.Kill()
-	}
+	go func() {
 
-	{
-		err := netns.DeleteNamed("lab")
-		for node := range nodesof(nodes, OfType(nodeAsset)) {
-			err = errors.Join(err, netns.DeleteNamed(node.name))
+		term := make(chan Controller)
+		ready <- term
+		nodes := func(yield func(n RunningNode) bool) {
+			for _, nn := range VMS {
+				if !yield(nn) {
+					return
+				}
+			}
+			for nn := range nodesof(nodes, OfType(nodeAsset)) {
+				if !yield((*AssetNode)(nn)) {
+					return
+				}
+			}
 		}
-		if err != nil {
-			return fmt.Errorf("deleting lab: %w", err)
+
+		for f := range term {
+			f(nodes)
 		}
-	}
+		if err := netns.DeleteNamed("lab"); err != nil {
+			slog.Warn("cannot delete lab netns", "errors", err)
+		}
+
+		TelnetNum = 23 // need a stricter write barrier, this is racy
+	}()
 	return nil
 }
 
@@ -370,14 +387,11 @@ func writeSysctl(path string, value string) error {
 }
 
 var (
-	ImagesDefaultLocation = "/opt/labomatic/images"
-	MikrotikImage         = "chr-7.16.1.qcow"
+	ImagesDefaultLocation = "/usr/lib/labomatic"
+	MikrotikImage         = "routeros.img"
 	CyberOSImage          = "csw-2407.qcow"
 
 	TmpDir string
-
-	// global variables, the script is not persistent…
-	VMS []*exec.Cmd
 
 	TelnetNum = 23 // standard telnet
 )
@@ -386,7 +400,9 @@ func init() {
 	TmpDir, _ = os.MkdirTemp("", "labomatic_")
 }
 
-func RunVM(node *netnode, taps map[string]*os.File) error {
+// RunVM starts the given node as virtual machine.
+// If an error is returned, but a non-nil command is returned, the command must be properly terminated.
+func RunVM(node *netnode, taps map[string]*os.File) (*exec.Cmd, error) {
 	base := node.image
 	if base == "" {
 		switch node.typ {
@@ -399,18 +415,18 @@ func RunVM(node *netnode, taps map[string]*os.File) error {
 		}
 	}
 	if !filepath.IsAbs(base) {
+		// TODO(rdo) take this from command-line via DBUS instead
 		wd, err := os.Getwd()
 		if err != nil {
-			return fmt.Errorf("cannot get current working dir: %w", err)
+			return nil, fmt.Errorf("cannot get current working dir: %w", err)
 		}
 		if _, err := os.Stat(filepath.Join(ImagesDefaultLocation, base)); err == nil {
 			base = filepath.Join(ImagesDefaultLocation, base)
 		} else if _, err := os.Stat(filepath.Join(wd, base)); err == nil {
 			base = filepath.Join(wd, base)
 		} else {
-			return fmt.Errorf("image %s cannot be found in default location [%s,%s]", base, ImagesDefaultLocation, wd)
+			return nil, fmt.Errorf("image %s cannot be found in default location [%s,%s]", base, ImagesDefaultLocation, wd)
 		}
-
 	}
 
 	vst := filepath.Join(TmpDir, node.name+".qcow2")
@@ -423,7 +439,7 @@ func RunVM(node *netnode, taps map[string]*os.File) error {
 		if errors.As(err, &perr) {
 			os.Stderr.Write(perr.Stderr)
 		}
-		return fmt.Errorf("creating disk: %w", err)
+		return nil, fmt.Errorf("creating disk: %w", err)
 	}
 
 	TelnetNum++
@@ -464,13 +480,15 @@ func RunVM(node *netnode, taps map[string]*os.File) error {
 		cm.ExtraFiles = append(cm.ExtraFiles, taps[iface.name])
 	}
 
-	VMS = append(VMS, cm)
-
 	if err := cm.Start(); err != nil {
-		return fmt.Errorf("running qemu: %w", err)
+		return nil, fmt.Errorf("running qemu: %w", err)
 	}
 
-	return ExecGuest(TelnetNum, node)
+	if err := ExecGuest(TelnetNum, node); err != nil {
+		return cm, err
+	}
+
+	return cm, nil
 }
 
 func ExecGuest(portnum int, node *netnode) error {

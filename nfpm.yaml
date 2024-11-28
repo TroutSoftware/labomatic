@@ -5,7 +5,7 @@
 name: "labomatic"
 arch: "amd64"
 platform: "linux"
-version: "v0.5.1"
+version: "v0.5.2"
 section: "default"
 priority: "extra"
 maintainer: "Trout Software <devit@trout.software>"
@@ -13,11 +13,26 @@ description: |
   Labomatic for lab creation
 contents:
  - src: build/routeros.img
-   dst: /var/lib/labomatic/routeros.img
+   dst: /usr/lib/labomatic/routeros.img
 
  - src: build/labd
    dst: /usr/lib/labomatic/labd
 
+ - src: build/labctl
+   dst: /usr/bin/labctl
+
+ - src: install/dbus_conf
+   dst: /usr/share/dbus-1/system.d/software.trout.labomatic.conf
+
+ - src: install/dbus_service
+   dst: /usr/share/dbus-1/services/software.trout.labomatic.service
+
+ - src: install/systemd_service
+   dst: /lib/systemd/system/labomatic.service
+
 depends:
   - qemu-system-x86
   - nftables
+
+scripts:
+  postinstall: ./install/postinst
