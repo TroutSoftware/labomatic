@@ -36,7 +36,8 @@ type VMNode struct {
 func (n VMNode) Node() *netnode { return n.node }
 func (n VMNode) Close() error {
 	n.cmd.Process.Kill()
-	return n.cmd.Wait()
+	n.cmd.Wait()
+	return nil
 }
 
 type AssetNode netnode
@@ -59,33 +60,25 @@ func FormatTable(into io.Writer, done chan struct{}) Controller {
 			colType:  10,
 			colAddrs: 16,
 		}
-		hdr := "+" + strings.Repeat("-", sizes[colName]) +
-			"+" + strings.Repeat("-", sizes[colType]) +
-			"+" + strings.Repeat("-", sizes[colAddrs]) +
-			"+"
 
-		fmt.Fprintln(into, hdr)
-		fmt.Fprintln(into, "+   name   |   type   |    addresses   +")
-		fmt.Fprintln(into, hdr)
+		fmt.Fprintln(into, "\033[1mname       type       addresses\033[0m")
 
 		for n := range s {
 			name := n.Node().name
 			typ := prettyType(n.Node().typ)
-			fmt.Fprint(into, "+ ", name+strings.Repeat(" ", sizes[colName]-len(name)-1), "|")
-			fmt.Fprint(into, " ", typ+strings.Repeat(" ", sizes[colType]-len(typ)-1), "|")
+			fmt.Fprint(into, name+strings.Repeat(" ", sizes[colName]-len(name)-1), " ")
+			fmt.Fprint(into, " ", typ+strings.Repeat(" ", sizes[colType]-len(typ)-1), " ")
 			if len(n.Node().ifcs) > 0 {
 				addr := n.Node().ifcs[0].addr.Addr().String()
-				fmt.Fprintln(into, " "+addr+strings.Repeat(" ", sizes[colAddrs]-len(addr)-1)+"|")
+				fmt.Fprintln(into, " "+addr)
 				for i := 1; i < len(n.Node().ifcs); i++ {
 					addr := n.Node().ifcs[i].addr.Addr().String()
-					fmt.Fprintln(into, "+          |          |",
-						addr+strings.Repeat(" ", sizes[colAddrs]-len(addr)-1)+"|")
+					fmt.Fprintln(into, "                     ", addr)
 				}
 			} else {
-				fmt.Fprintln(into, "                |")
+				fmt.Fprintln(into, "")
 			}
 		}
-		fmt.Fprintln(into, hdr)
 		close(done)
 	}
 }

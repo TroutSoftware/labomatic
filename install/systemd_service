@@ -8,7 +8,6 @@ BusName=software.trout.labomatic
 ExecStart=/usr/lib/labomatic/labd
 NotifyAccess=main
 Restart=on-failure
-CapabilityBoundingSet=CAP_NET_ADMIN
 
 # Filesystem lockdown
 ProtectSystem=strict

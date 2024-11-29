@@ -10,14 +10,18 @@ import (
 	"net/netip"
 	"os"
 	"os/exec"
+	"os/user"
 	"path/filepath"
 	"runtime"
+	"strconv"
+	"syscall"
 	"text/template"
 	"time"
 
 	"github.com/vishvananda/netlink"
 	"github.com/vishvananda/netns"
 	"go.starlark.net/starlark"
+	"golang.org/x/sys/unix"
 )
 
 // TODO multi-labs:
@@ -45,7 +49,7 @@ table inet labomatic {
 // Build creates the full virtual lab from the Starlark definitions.
 // Read status from msg to follow progress (or have a goroutine ignore all messages if not intersted).
 // The term channel can be closed to terminate all current instances.
-func Build(nodes starlark.StringDict, msg chan<- string, ready chan chan Controller) error {
+func Build(nodes starlark.StringDict, runas user.User, msg chan<- string, ready chan chan Controller) error {
 	runtime.LockOSThread()
 	defer runtime.UnlockOSThread()
 
@@ -56,7 +60,7 @@ func Build(nodes starlark.StringDict, msg chan<- string, ready chan chan Control
 
 	nslab, err := netns.NewNamed("lab")
 	if err != nil {
-		return fmt.Errorf("cannot create namespace: %w", err)
+		return fmt.Errorf("cannot create lab namespace: %w", err)
 	}
 
 	msg <- "<I>Building the Lab"
@@ -225,7 +229,7 @@ func Build(nodes starlark.StringDict, msg chan<- string, ready chan chan Control
 		}
 
 		// note this run in the same LockOSThread so that network namespace is kept
-		cm, err := RunVM(node, taps)
+		cm, err := RunVM(node, taps, runas)
 		if cm != nil {
 			VMS = append(VMS, VMNode{node: node, cmd: cm})
 		}
@@ -238,9 +242,15 @@ func Build(nodes starlark.StringDict, msg chan<- string, ready chan chan Control
 
 	// fourth pass: the assets
 	for node := range nodesof(nodes, OfType(nodeAsset)) {
+		// must switch to main namespace to create new ones
+		// see https://serverfault.com/questions/961504/cannot-create-nested-network-namespace
+		if err := netns.Set(nsdefault); err != nil {
+			return fmt.Errorf("cannot switch to host namespace: %w", err)
+		}
+
 		ns, err := netns.NewNamed(node.name)
 		if err != nil {
-			return fmt.Errorf("cannot create namespace: %w", err)
+			return fmt.Errorf("cannot create namespace %s: %w", node.name, err)
 		}
 
 		for i, iface := range node.ifcs {
@@ -402,7 +412,7 @@ func init() {
 
 // RunVM starts the given node as virtual machine.
 // If an error is returned, but a non-nil command is returned, the command must be properly terminated.
-func RunVM(node *netnode, taps map[string]*os.File) (*exec.Cmd, error) {
+func RunVM(node *netnode, taps map[string]*os.File, runas user.User) (*exec.Cmd, error) {
 	base := node.image
 	if base == "" {
 		switch node.typ {
@@ -476,6 +486,23 @@ func RunVM(node *netnode, taps map[string]*os.File) (*exec.Cmd, error) {
 	}
 	cm := exec.Command("/usr/bin/qemu-system-x86_64", args...)
 	cm.Stderr = os.Stderr
+
+	uid, err := strconv.ParseUint(runas.Uid, 10, 32)
+	if err != nil {
+		return nil, fmt.Errorf("invalid user id %s: %w", runas.Uid, err)
+	}
+	gid, err := strconv.ParseUint(runas.Gid, 10, 32)
+	if err != nil {
+		return nil, fmt.Errorf("invalid group id %s: %w", runas.Gid, err)
+	}
+
+	cm.SysProcAttr = &syscall.SysProcAttr{
+		Credential:  &syscall.Credential{Uid: uint32(uid), Gid: uint32(gid)},
+		AmbientCaps: []uintptr{unix.CAP_NET_BIND_SERVICE}, // telnet connector
+	}
+	// chown allow qemu access to the image
+	unix.Chown(TmpDir, int(uid), int(gid))
+	unix.Chown(vst, int(uid), int(gid))
 	for _, iface := range node.ifcs {
 		cm.ExtraFiles = append(cm.ExtraFiles, taps[iface.name])
 	}

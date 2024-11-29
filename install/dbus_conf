@@ -8,6 +8,7 @@
                 <allow own="software.trout.labomatic"/>
                 <allow send_destination="software.trout.labomatic"/>
                 <allow receive_sender="software.trout.labomatic"/>
+                <allow send_destination="org.freedesktop.DBus"/>
         </policy>
 
         <policy context="default">
