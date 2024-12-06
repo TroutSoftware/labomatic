@@ -7,8 +7,6 @@ import (
 	"log/slog"
 	"os/exec"
 	"strings"
-
-	"github.com/vishvananda/netns"
 )
 
 // Controllers are used to define what commands to run on the lab
@@ -23,27 +21,17 @@ func TermLab(nss iter.Seq[RunningNode]) {
 }
 
 // Nodes are VMs or light namespaces in the current lab
-type RunningNode interface {
-	Node() *netnode
-	Close() error
-}
-
-type VMNode struct {
+type RunningNode struct {
 	node *netnode
 	cmd  *exec.Cmd
 }
 
-func (n VMNode) Node() *netnode { return n.node }
-func (n VMNode) Close() error {
+func (n RunningNode) Node() *netnode { return n.node }
+func (n RunningNode) Close() error {
 	n.cmd.Process.Kill()
 	n.cmd.Wait()
 	return nil
 }
-
-type AssetNode netnode
-
-func (n *AssetNode) Node() *netnode { return (*netnode)(n) }
-func (n *AssetNode) Close() error   { return netns.DeleteNamed(n.name) }
 
 func FormatTable(into io.Writer, done chan struct{}) Controller {
 	const (

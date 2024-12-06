@@ -17,7 +17,7 @@ import (
 	"github.com/godbus/dbus/v5"
 	"github.com/godbus/dbus/v5/introspect"
 
-	// "github.com/landlock-lsm/go-landlock/landlock"
+	"github.com/landlock-lsm/go-landlock/landlock"
 	"go.starlark.net/starlark"
 	"go.starlark.net/syntax"
 )
@@ -51,20 +51,18 @@ func main() {
 		log.Fatal("a process is already running at that name")
 	}
 
-	/*
-		landlock.V5.BestEffort().RestrictPaths(
-			// access to lab and self
-			landlock.RODirs("/usr/lib/labomatic", "/home"),
-			landlock.RWDirs("/tmp"),
-			landlock.RWDirs("/run/dbus/system_bus_socket"),
+	landlock.V5.BestEffort().RestrictPaths(
+		// access to lab and self
+		landlock.RODirs("/usr/lib/labomatic", "/home"),
+		landlock.RWDirs("/tmp"),
+		landlock.RWDirs("/run/dbus/system_bus_socket"),
 
-			// manage network namespaces
-			landlock.RWDirs("/run/netns"),
-			landlock.RWDirs(fmt.Sprintf("/proc/%d", os.Getpid())),
-			landlock.ROFiles("/usr/sbin/nft", "/usr/bin/resolvectl"),
-			landlock.RWFiles("/proc/sys/net/ipv4/ip_forward"),
-		)
-	*/
+		// manage network namespaces
+		landlock.RWDirs("/run/netns"),
+		landlock.RWDirs(fmt.Sprintf("/proc/%d", os.Getpid())),
+		landlock.ROFiles("/usr/sbin/nft", "/usr/bin/resolvectl"),
+		landlock.RWFiles("/proc/sys/net/ipv4/ip_forward"),
+	)
 
 	wait := make(chan os.Signal, 1)
 	signal.Notify(wait, os.Interrupt)

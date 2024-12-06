@@ -26,5 +26,4 @@ NoNewPrivileges=true
 RestrictRealtime=true
 
 [Install]
-WantedBy=multi-user.target
 Alias=dbus-software.trout.labomatic.service

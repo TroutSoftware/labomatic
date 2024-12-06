@@ -1,9 +1,6 @@
 package labomatic
 
 import (
-	"bytes"
-	"crypto/rand"
-	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -11,22 +8,14 @@ import (
 	"os"
 	"os/exec"
 	"os/user"
-	"path/filepath"
 	"runtime"
-	"strconv"
-	"syscall"
+	"slices"
 	"text/template"
-	"time"
 
 	"github.com/vishvananda/netlink"
 	"github.com/vishvananda/netns"
 	"go.starlark.net/starlark"
-	"golang.org/x/sys/unix"
 )
-
-// TODO multi-labs:
-//  - set unique ns
-//  - persistence with names
 
 var masquerade_rule = template.Must(template.New("nft_masquerade").Parse(`
 table inet labomatic
@@ -153,7 +142,7 @@ func Build(nodes starlark.StringDict, runas user.User, msg chan<- string, ready 
 			return fmt.Errorf("cannot enable IP forwarding: %w", err)
 		}
 
-		fh, err := os.CreateTemp("", "nft_add")
+		fh, err := os.CreateTemp(TmpDir, "nft_add")
 		if err != nil {
 			return fmt.Errorf("cannot create temp file: %w", err)
 		}
@@ -170,35 +159,9 @@ func Build(nodes starlark.StringDict, runas user.User, msg chan<- string, ready 
 
 	msg <- "<I>Internal networks created"
 
-	// second pass: serial access
-	{
-		veth := &netlink.Veth{
-			LinkAttrs: netlink.LinkAttrs{
-				NetNsID: 1,
-				Name:    "telnet",
-				TxQLen:  -1,
-			},
-			PeerName: "admin",
-		}
-		err := addveth(nslab, nsdefault, veth, func(peer netlink.Link) error {
-			addr, _ := netlink.ParseAddr("169.254.169.1/30")
-			return netlink.AddrAdd(peer, addr)
-		})
-		if err != nil {
-			return fmt.Errorf("cannot create host handle: %w", err)
-		}
-
-		addr, _ := netlink.ParseAddr("169.254.169.2/30")
-		if err := netlink.AddrAdd(veth, addr); err != nil {
-			return fmt.Errorf("creating admin handle: %w", err)
-		}
-
-	}
-	msg <- "<I>Serial over Telnet available"
-
-	// third pass: the VMs
+	// second pass: the VMs
 	var errc int
-	var VMS []VMNode
+	var VMS []RunningNode
 
 	for node := range nodesof(nodes, OfType(nodeRouter), OfType(nodeSwitch)) {
 		taps := make(map[string]*os.File)
@@ -231,7 +194,7 @@ func Build(nodes starlark.StringDict, runas user.User, msg chan<- string, ready 
 		// note this run in the same LockOSThread so that network namespace is kept
 		cm, err := RunVM(node, taps, runas)
 		if cm != nil {
-			VMS = append(VMS, VMNode{node: node, cmd: cm})
+			VMS = append(VMS, RunningNode{node: node, cmd: cm})
 		}
 		if err != nil {
 			errc++
@@ -240,7 +203,7 @@ func Build(nodes starlark.StringDict, runas user.User, msg chan<- string, ready 
 	}
 	msg <- fmt.Sprintf("<I>Virtual machines started (%d failed)", errc)
 
-	// fourth pass: the assets
+	// third pass: the assets
 	for node := range nodesof(nodes, OfType(nodeAsset)) {
 		// must switch to main namespace to create new ones
 		// see https://serverfault.com/questions/961504/cannot-create-nested-network-namespace
@@ -283,31 +246,24 @@ func Build(nodes starlark.StringDict, runas user.User, msg chan<- string, ready 
 				}
 			}
 
-			msg <- fmt.Sprintf("<I>Connect to %s using: ip netns exec %s bash", node.name, node.name)
-
 		}
+
+		/*
+			cm, err := RunAsset(runas)
+			if cm != nil {
+				VMS = append(VMS, RunningNode{node: node, cmd: cm})
+			}
+		*/
+
 	}
 	msg <- ("<I>Assets namespaces started")
 
 	go func() {
-
 		term := make(chan Controller)
 		ready <- term
-		nodes := func(yield func(n RunningNode) bool) {
-			for _, nn := range VMS {
-				if !yield(nn) {
-					return
-				}
-			}
-			for nn := range nodesof(nodes, OfType(nodeAsset)) {
-				if !yield((*AssetNode)(nn)) {
-					return
-				}
-			}
-		}
 
 		for f := range term {
-			f(nodes)
+			f(slices.Values(VMS))
 		}
 		if err := netns.DeleteNamed("lab"); err != nil {
 			slog.Warn("cannot delete lab netns", "errors", err)
@@ -399,7 +355,7 @@ func writeSysctl(path string, value string) error {
 var (
 	ImagesDefaultLocation = "/usr/lib/labomatic"
 	MikrotikImage         = "routeros.img"
-	CyberOSImage          = "csw-2407.qcow"
+	CyberOSImage          = "csw.img"
 
 	TmpDir string
 
@@ -408,284 +364,4 @@ var (
 
 func init() {
 	TmpDir, _ = os.MkdirTemp("", "labomatic_")
-}
-
-// RunVM starts the given node as virtual machine.
-// If an error is returned, but a non-nil command is returned, the command must be properly terminated.
-func RunVM(node *netnode, taps map[string]*os.File, runas user.User) (*exec.Cmd, error) {
-	base := node.image
-	if base == "" {
-		switch node.typ {
-		default:
-			panic("unknown node type")
-		case nodeRouter:
-			base = MikrotikImage
-		case nodeSwitch:
-			base = CyberOSImage
-		}
-	}
-	if !filepath.IsAbs(base) {
-		// TODO(rdo) take this from command-line via DBUS instead
-		wd, err := os.Getwd()
-		if err != nil {
-			return nil, fmt.Errorf("cannot get current working dir: %w", err)
-		}
-		if _, err := os.Stat(filepath.Join(ImagesDefaultLocation, base)); err == nil {
-			base = filepath.Join(ImagesDefaultLocation, base)
-		} else if _, err := os.Stat(filepath.Join(wd, base)); err == nil {
-			base = filepath.Join(wd, base)
-		} else {
-			return nil, fmt.Errorf("image %s cannot be found in default location [%s,%s]", base, ImagesDefaultLocation, wd)
-		}
-	}
-
-	vst := filepath.Join(TmpDir, node.name+".qcow2")
-	_, err := exec.Command("/usr/bin/qemu-img", "create",
-		"-f", "qcow2", "-F", "qcow2",
-		"-b", base,
-		vst).Output()
-	if err != nil {
-		var perr *exec.ExitError
-		if errors.As(err, &perr) {
-			os.Stderr.Write(perr.Stderr)
-		}
-		return nil, fmt.Errorf("creating disk: %w", err)
-	}
-
-	TelnetNum++
-	args := []string{
-		"-machine", "accel=kvm,type=q35",
-		"-cpu", "host",
-		"-m", "512",
-		"-nographic",
-		"-monitor", "none",
-		"-device", "virtio-rng-pci",
-		"-chardev", fmt.Sprintf("socket,id=ga0,host=127.0.10.1,port=%d,server=on,wait=off", TelnetNum),
-		"-device", "virtio-serial",
-		"-device", fmt.Sprintf("virtserialport,chardev=ga0,name=%s", node.agent().Path()),
-		"-serial", fmt.Sprintf("telnet:169.254.169.2:%d,server,wait=off,nodelay=on", TelnetNum),
-		"-drive", fmt.Sprintf("format=qcow2,file=%s", vst),
-	}
-	if node.uefi {
-		args = append(args, "-drive", "if=pflash,format=raw,unit=0,readonly=on,file=/usr/share/ovmf/OVMF.fd")
-	}
-	if node.media != "" {
-		args = append(args, "-drive", fmt.Sprintf("if=none,id=backup,format=raw,file=%s", node.media))
-	}
-
-	fmt.Printf("	Connect to \033[38;5;7m%s\033[0m using:    telnet 169.254.169.2 %d\n", node.name, TelnetNum)
-
-	const fdtap = 3 // since stderr / stdout / stdin are passed
-	if len(node.ifcs) == 0 {
-		args = append(args, "-nic", "none")
-	}
-	for i := range node.ifcs {
-		args = append(args,
-			"-nic", fmt.Sprintf("tap,fd=%d,model=e1000,mac=52:54:00:%s", fdtap+i, rndmac()),
-		)
-	}
-	cm := exec.Command("/usr/bin/qemu-system-x86_64", args...)
-	cm.Stderr = os.Stderr
-
-	uid, err := strconv.ParseUint(runas.Uid, 10, 32)
-	if err != nil {
-		return nil, fmt.Errorf("invalid user id %s: %w", runas.Uid, err)
-	}
-	gid, err := strconv.ParseUint(runas.Gid, 10, 32)
-	if err != nil {
-		return nil, fmt.Errorf("invalid group id %s: %w", runas.Gid, err)
-	}
-
-	cm.SysProcAttr = &syscall.SysProcAttr{
-		Credential:  &syscall.Credential{Uid: uint32(uid), Gid: uint32(gid)},
-		AmbientCaps: []uintptr{unix.CAP_NET_BIND_SERVICE}, // telnet connector
-	}
-	// chown allow qemu access to the image
-	unix.Chown(TmpDir, int(uid), int(gid))
-	unix.Chown(vst, int(uid), int(gid))
-	for _, iface := range node.ifcs {
-		cm.ExtraFiles = append(cm.ExtraFiles, taps[iface.name])
-	}
-
-	if err := cm.Start(); err != nil {
-		return nil, fmt.Errorf("running qemu: %w", err)
-	}
-
-	if err := ExecGuest(TelnetNum, node); err != nil {
-		return cm, err
-	}
-
-	return cm, nil
-}
-
-func ExecGuest(portnum int, node *netnode) error {
-	// we need to wait for QEMU to set up the agent socket before asking
-	// to early in the boot, and we never get an answer
-	// later, but still before the agent respond, and we need to spin sending messages, but the agent will replay them
-	// boot time show that the device is usually up in ~2 seconds
-	time.Sleep(1 * time.Second)
-	if node.typ == nodeSwitch {
-		return nil // TODO(rdo) build better
-	}
-
-	qemuAgent, err := OpenQMP("lab", "tcp", fmt.Sprintf("127.0.10.1:%d", portnum))
-	if err != nil {
-		return fmt.Errorf("cannot contact qmp: %w", err)
-	}
-	defer qemuAgent.Close()
-
-	dt := node.ToTemplate()
-
-	// wait for interfaces to be up.
-	// note we expect the VM to have possibly more interfaces than the template (e.g lo)
-	tries := 5
-waitUp:
-	slog.Debug("wait for interfaces to be up",
-		"node", node.name,
-		"attempt", 6-tries)
-	wantnames := make(map[string]bool)
-	for _, iface := range dt.Interfaces {
-		wantnames[iface.Name] = true
-	}
-	var GuestNetworkInterface []struct {
-		Name            string `json:"name"`
-		HardwareAddress string `json:"hardware-address"`
-	}
-	if err := qemuAgent.Do("guest-network-get-interfaces", nil, &GuestNetworkInterface); errors.Is(err, os.ErrDeadlineExceeded) {
-		if tries--; tries == 0 {
-			return fmt.Errorf("timeout waiting for interfaces")
-		}
-		time.Sleep(2 * time.Second << (5 - tries))
-		goto waitUp
-	} else if err != nil {
-		return fmt.Errorf("listing interfaces: %w", err)
-	}
-
-	for _, iface := range GuestNetworkInterface {
-		delete(wantnames, iface.Name)
-	}
-
-	if len(wantnames) > 0 {
-		if tries--; tries == 0 {
-			return fmt.Errorf("timeout waiting for interfaces")
-		}
-		time.Sleep(2 * time.Second << (5 - tries))
-		goto waitUp
-	}
-
-	iniscript := node.agent().defaultInit() + node.init
-	exp, err := template.New("init").Funcs(template.FuncMap{
-		"last_address": last,
-	}).Parse(iniscript)
-	if err != nil {
-		return fmt.Errorf("invalid init script: %w", err)
-	}
-
-	buf := new(bytes.Buffer)
-	if err := exp.Execute(buf, dt); err != nil {
-		return fmt.Errorf("invalid init script: %w", err)
-	}
-	slog.Debug("execute on guest", "cmd", buf.String())
-
-	var execresult struct {
-		PID int `json:"pid"`
-	}
-	err = qemuAgent.Do("guest-exec", node.agent().Execute(buf.Bytes()), &execresult)
-	if err != nil {
-		return fmt.Errorf("running provisioning script: %w", err)
-	}
-	slog.Debug("exec script returns", "pid", execresult.PID)
-
-	for range 10 {
-		var GuestExecStatus struct {
-			Exited   bool   `json:"exited"`
-			ExitCode int    `json:"exitcode"`
-			OutData  []byte `json:"out-data"`
-			ErrData  []byte `json:"err-data"`
-		}
-		err := qemuAgent.Do("guest-exec-status", struct {
-			PID int `json:"pid"`
-		}{execresult.PID}, &GuestExecStatus)
-		if err != nil {
-			return fmt.Errorf("cannot read exec status: %w", err)
-		}
-
-		if GuestExecStatus.Exited {
-			if GuestExecStatus.ExitCode == 0 {
-				if len(GuestExecStatus.OutData) > 0 {
-					fmt.Println("--- script results ---")
-					fmt.Println(string(GuestExecStatus.OutData))
-					fmt.Println("-----------------")
-				}
-				return nil
-			}
-			errdt := GuestExecStatus.ErrData
-			if len(errdt) == 0 {
-				errdt = GuestExecStatus.OutData
-			}
-			return fmt.Errorf("Error running script: %s", errdt)
-		}
-		slog.Debug("exec script did not terminate, continue")
-		time.Sleep(2 * time.Second)
-	}
-	return fmt.Errorf("could not properly seed machine")
-}
-
-func rndmac() string {
-	mc := make([]byte, 3)
-	rand.Read(mc)
-	return fmt.Sprintf("%x:%x:%x", mc[0], mc[1], mc[2])
-}
-
-// works around different implementations of the agent
-type GuestAgent interface {
-	Execute(data []byte) any
-	Path() string
-	defaultInit() string
-}
-
-type chr struct{}
-
-func (chr) Path() string { return "chr.provision_agent" }
-
-func (chr) Execute(data []byte) any {
-	return struct {
-		InputData     []byte `json:"input-data"`
-		CaptureOutput bool   `json:"capture-output"`
-	}{data, true}
-}
-
-func (chr) defaultInit() string {
-	return `{{ range .Interfaces }}
-{{ if .Address.IsValid }}
-/ip/address/add interface={{.Name}} address={{.Address}}/{{.Network.Bits}}
-{{- if .NATed}}
-/ip/route/add dst-address=0.0.0.0/0 gateway={{ last_address .Network }}
-/ip/dns/set servers=9.9.9.9,149.112.112.112
-{{ end }}
-{{ else if not .LinkOnly}}
-/ip/dhcp-client/add interface={{.Name}}
-{{ end }}
-{{ end }}
-/system/identity/set name="{{.Name}}"
-`
-}
-
-type csw struct{}
-
-func (csw) Path() string { return "cyberos.provision_agent" }
-func (csw) Execute(data []byte) any {
-	return struct {
-		Path    string `json:"path"`
-		Content string `json:"input-data"`
-	}{"<script>", string(data)}
-}
-
-func (csw) defaultInit() string {
-	return `{{ range .Interfaces }}
-{{ if .Address.IsValid }}
-PUT netcfg /ip/address/add interface={{.Name}} address={{.Address}}/{{.Network.Bits}}
-{{ end }}
-{{ end }}
-`
 }
