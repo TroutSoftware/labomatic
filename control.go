@@ -24,12 +24,20 @@ func TermLab(nss iter.Seq[RunningNode]) {
 type RunningNode struct {
 	node *netnode
 	cmd  *exec.Cmd
+
+	donefunc func()
 }
 
 func (n RunningNode) Node() *netnode { return n.node }
 func (n RunningNode) Close() error {
-	n.cmd.Process.Kill()
-	n.cmd.Wait()
+	if n.cmd != nil && n.cmd.Process != nil {
+		// the vm failed to start?
+		n.cmd.Process.Kill()
+		n.cmd.Wait()
+	}
+	if n.donefunc != nil {
+		n.donefunc()
+	}
 	return nil
 }
 

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"flag"
 	"fmt"
 	"log"
@@ -139,6 +140,27 @@ func (l *LabServer) Status() (string, *dbus.Error) {
 	l.ctrl <- labomatic.FormatTable(&view, done)
 	<-done
 	return view.String(), nil
+}
+
+func (l *LabServer) Attach(sdr dbus.Sender, name string) (dbus.UnixFD, *dbus.Error) {
+	var runas user.User
+	{
+		c := l.dbus.Call("GetConnectionUnixUser", 0, sdr)
+		if c.Err != nil {
+			return -1, dbus.MakeFailedError(fmt.Errorf("cannot identify calling user: %w", c.Err))
+		}
+		uid := c.Body[0].(uint32)
+		found, err := user.LookupId(strconv.Itoa(int(uid)))
+		if err != nil {
+			return -1, dbus.MakeFailedError(fmt.Errorf("invalid user %d: %w", uid, err))
+		}
+		runas = *found
+	}
+	fd, err := labomatic.RunAsset(context.TODO(), name, runas)
+	if err != nil {
+		return -1, dbus.MakeFailedError(err)
+	}
+	return dbus.UnixFD(fd), nil
 }
 
 func (l *LabServer) Stop() *dbus.Error {

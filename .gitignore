@@ -1,3 +1,4 @@
 /labomatic
 .envrc
 deps.mkd
+build

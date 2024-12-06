@@ -58,6 +58,13 @@ func main() {
 			os.Exit(1)
 		}
 		fmt.Println(call.Body[0].(string))
+	case "attach":
+		call := lab.CallWithContext(context.TODO(), "Attach", 0, labdir)
+		if call.Err != nil {
+			fmt.Println("cannot read lab status:", call.Err)
+			os.Exit(1)
+		}
+		fmt.Println("returned fd", call.Body[0].(int))
 	case "stop":
 		call := lab.CallWithContext(context.TODO(), "Stop", dbus.FlagAllowInteractiveAuthorization)
 		if call.Err != nil {

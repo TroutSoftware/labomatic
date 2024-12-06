@@ -1,16 +1,16 @@
 package labomatic
 
 import (
+	"context"
 	"fmt"
-	"io"
-	"os"
 	"os/exec"
 	"os/user"
+	"runtime"
 	"strconv"
 	"syscall"
 
 	"github.com/creack/pty/v2"
-	"golang.org/x/sys/unix"
+	"github.com/vishvananda/netns"
 )
 
 func UserNumID(u user.User) (uid, gid uint64, err error) {
@@ -26,40 +26,29 @@ func UserNumID(u user.User) (uid, gid uint64, err error) {
 	return
 }
 
-func RunAsset(runas user.User) (*exec.Cmd, error) {
+func RunAsset(ctx context.Context, name string, runas user.User) (int32, error) {
+	runtime.LockOSThread()
+	defer runtime.UnlockOSThread()
+
 	uid, gid, err := UserNumID(runas)
 	if err != nil {
-		return nil, fmt.Errorf("finding unix user %s: %w", runas, err)
+		return -1, fmt.Errorf("finding unix user %s: %w", runas, err)
 	}
 
-	sh := os.Getenv("SHELL")
-	if sh == "" {
-		sh = "sh"
+	hdl, err := netns.GetFromName(name)
+	if err != nil {
+		return -1, fmt.Errorf("no such namespace %s: %w", name, err)
 	}
+	netns.Set(hdl)
 
-	cmd := exec.Command(sh)
+	cmd := exec.Command("/bin/bash")
 	cmd.SysProcAttr = &syscall.SysProcAttr{
-		// TODO: chroot to wd or home
 		Credential: &syscall.Credential{Uid: uint32(uid), Gid: uint32(gid)},
 	}
-	pty1, err := pty.Start(cmd)
+	pty, err := pty.Start(cmd)
 	if err != nil {
-		return nil, fmt.Errorf("starting pty: %w", err)
+		return -1, err
 	}
 
-	pty2, tty2, err := pty.Open()
-	if err != nil {
-		return nil, fmt.Errorf("starting pty: %w", err)
-	}
-
-	if err := unix.Chown(tty2.Name(), int(uid), int(gid)); err != nil {
-		return nil, fmt.Errorf("changing tty owner: %w", err)
-	}
-
-	fmt.Println("listen on", tty2.Name())
-
-	go io.Copy(pty2, pty1)
-	go io.Copy(pty1, pty2)
-
-	return cmd, nil
+	return int32(pty.Fd()), nil
 }

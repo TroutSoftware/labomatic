@@ -15,6 +15,7 @@ import (
 	"github.com/vishvananda/netlink"
 	"github.com/vishvananda/netns"
 	"go.starlark.net/starlark"
+	"golang.org/x/sys/unix"
 )
 
 var masquerade_rule = template.Must(template.New("nft_masquerade").Parse(`
@@ -160,6 +161,14 @@ func Build(nodes starlark.StringDict, runas user.User, msg chan<- string, ready 
 	msg <- "<I>Internal networks created"
 
 	// second pass: the VMs
+
+	{
+		user, group, err := UserNumID(runas)
+		if err != nil {
+			return fmt.Errorf("cannot read user id %s: %w", runas, err)
+		}
+		unix.Chown(TmpDir, int(user), int(group))
+	}
 	var errc int
 	var VMS []RunningNode
 
@@ -248,12 +257,7 @@ func Build(nodes starlark.StringDict, runas user.User, msg chan<- string, ready 
 
 		}
 
-		/*
-			cm, err := RunAsset(runas)
-			if cm != nil {
-				VMS = append(VMS, RunningNode{node: node, cmd: cm})
-			}
-		*/
+		VMS = append(VMS, RunningNode{node: node, donefunc: func() { netns.DeleteNamed(node.name) }})
 
 	}
 	msg <- ("<I>Assets namespaces started")

@@ -45,40 +45,25 @@ func RunVM(node *netnode, taps map[string]*os.File, runas user.User) (*exec.Cmd,
 			return nil, fmt.Errorf("image %s cannot be found in default location [%s,%s]", base, ImagesDefaultLocation, wd)
 		}
 	}
-
-	vst := filepath.Join(TmpDir, node.name+".qcow2")
-	_, err := exec.Command("/usr/bin/qemu-img", "create",
-		"-f", "qcow2", "-F", "qcow2",
-		"-b", base,
-		vst).Output()
-	if err != nil {
-		var perr *exec.ExitError
-		if errors.As(err, &perr) {
-			os.Stderr.Write(perr.Stderr)
-		}
-		return nil, fmt.Errorf("creating disk: %w", err)
-	}
-
 	uid, gid, err := UserNumID(runas)
 	if err != nil {
 		return nil, fmt.Errorf("invalid user id %s: %w", runas.Uid, err)
 	}
 
-	serialpipe := filepath.Join(TmpDir, "serial_"+node.name)
-	{
-		// chown allow qemu access to the image
-		// TODO check if we need the out/in, or if qemu can create it on its own
-		err := errors.Join(
-			unix.Chown(TmpDir, int(uid), int(gid)),
-			unix.Chown(vst, int(uid), int(gid)),
-			unix.Mkfifo(serialpipe+".in", 0700),
-			unix.Chown(serialpipe+".in", int(uid), int(gid)),
-			unix.Mkfifo(serialpipe+".out", 0700),
-			unix.Chown(serialpipe+".out", int(uid), int(gid)),
-		)
-		if err != nil {
-			return nil, fmt.Errorf("creating VM communication structures: %w", err)
+	vst := filepath.Join(TmpDir, node.name+".qcow2")
+	cmd := exec.Command("/usr/bin/qemu-img", "create",
+		"-f", "qcow2", "-F", "qcow2",
+		"-b", base,
+		vst)
+	cmd.SysProcAttr = &syscall.SysProcAttr{
+		Credential: &syscall.Credential{Uid: uint32(uid), Gid: uint32(gid)},
+	}
+	if _, err := cmd.Output(); err != nil {
+		var perr *exec.ExitError
+		if errors.As(err, &perr) {
+			os.Stderr.Write(perr.Stderr)
 		}
+		return nil, fmt.Errorf("creating disk: %w", err)
 	}
 
 	// TODO move to unix socket for guest agent
