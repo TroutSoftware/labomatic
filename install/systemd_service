@@ -9,13 +9,6 @@ ExecStart=/usr/lib/labomatic/labd
 NotifyAccess=main
 Restart=on-failure
 
-# Filesystem lockdown
-ProtectSystem=strict
-ProtectHome=read-only
-PrivateTmp=true
-ProtectKernelTunables=true
-ProtectControlGroups=true
-
 # Execute Mappings
 MemoryDenyWriteExecute=true
 
