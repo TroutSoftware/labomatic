@@ -208,7 +208,7 @@ var attach_iface = starlark.NewBuiltin("attach_nic", func(thread *starlark.Threa
 	// TODO use MAC address instead
 	var ifname string
 	switch nd.typ {
-	case nodeSwitch:
+	case nodeSwitch, nodeAsset:
 		const pciOffset = 0
 		ifname = fmt.Sprintf("eth%d", len(nd.ifcs))
 	case nodeRouter:
@@ -256,6 +256,8 @@ func (r *netnode) agent() GuestAgent {
 	case nodeRouter:
 		return chr{}
 	case nodeSwitch:
+		return csw{}
+	case nodeAsset:
 		return csw{}
 	default:
 		panic("unknown node type")

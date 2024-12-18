@@ -3,10 +3,11 @@
 #
 # The multiple elements of the package are provided
 
-LABOMATIC_VERSION := 0.5.2
+LABOMATIC_VERSION := 0.5.3
 
 build/labomatic_$(LABOMATIC_VERSION)_amd64.deb: build/labd build/labctl build/routeros.img
 build/labomatic_$(LABOMATIC_VERSION)_amd64.deb: build/nfpm nfpm.yaml
+build/labomatic_$(LABOMATIC_VERSION)_amd64.deb: build/initfs build/vmlinuz-cyos
 build/labomatic_$(LABOMATIC_VERSION)_amd64.deb: $(wildcard install/*)
 	build/nfpm --packager deb --target build package
 
@@ -25,6 +26,10 @@ clean:
 #
 # [nfpm] https://nfpm.goreleaser.com/
 # [mikrotik] https://mikrotik.com/download
+
+ifeq (,$(wildcard build/vmlinuz-cyos))
+	$(error "CyberOS kernel must be acquired manually")
+endif
 
 build/check: build/routeros.img build/nfpm
 	sha256sum --check cksum | tee $@
@@ -45,10 +50,19 @@ build/routeros.img:
 	unzip -d build build/routeros.img.zip
 	qemu-img convert -f raw -O qcow2 build/chr-$(MTK_VERSION).img $@
 
-deps.mkd: $(wildcard *.go) $(wildcard cmd/labd/*.go) $(wildcard cmd/labctl/*.go)
-	godeps -o $@ ./cmd/labd ./cmd/labctl
+deps.mkd: $(wildcard *.go) $(wildcard cmd/labd/*.go) $(wildcard cmd/labctl/*.go) $(wildcard assets/uinit/*.go)
+	godeps -o $@ ./cmd/labd ./cmd/labctl ./assets/uinit
 
 include deps.mkd
+
+build/uinit: github.com/TroutSoftware/labomatic/assets/uinit
+	go build -o $@ $<
+
+build/kragent: go.mod
+	go build -tags osusergo,netgo -o $@ github.com/bradfitz/qemu-guest-kragent
+
+build/initfs: build/uinit build/kragent assets/initfs.elv
+	elvish assets/initfs.elv -o $@
 
 build/labd: deps.mkd
 build/labd: github.com/TroutSoftware/labomatic/cmd/labd

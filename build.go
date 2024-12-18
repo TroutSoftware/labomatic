@@ -172,7 +172,9 @@ func Build(nodes starlark.StringDict, runas user.User, msg chan<- string, ready 
 	var errc int
 	var VMS []RunningNode
 
-	for node := range nodesof(nodes, OfType(nodeRouter), OfType(nodeSwitch)) {
+	for node := range nodesof(nodes,
+		OfType(nodeAsset), OfType(nodeSwitch), OfType(nodeRouter)) {
+		msg <- fmt.Sprintf("<D> starting VM %s", node.name)
 		taps := make(map[string]*os.File)
 		for i, iface := range node.ifcs {
 			lk, err := netlink.NewHandleAt(nslab)
@@ -211,56 +213,6 @@ func Build(nodes starlark.StringDict, runas user.User, msg chan<- string, ready 
 		}
 	}
 	msg <- fmt.Sprintf("<I>Virtual machines started (%d failed)", errc)
-
-	// third pass: the assets
-	for node := range nodesof(nodes, OfType(nodeAsset)) {
-		// must switch to main namespace to create new ones
-		// see https://serverfault.com/questions/961504/cannot-create-nested-network-namespace
-		if err := netns.Set(nsdefault); err != nil {
-			return fmt.Errorf("cannot switch to host namespace: %w", err)
-		}
-
-		ns, err := netns.NewNamed(node.name)
-		if err != nil {
-			return fmt.Errorf("cannot create namespace %s: %w", node.name, err)
-		}
-
-		for i, iface := range node.ifcs {
-			veth := &netlink.Veth{
-				LinkAttrs: netlink.LinkAttrs{
-					NetNsID: 1,
-					Name:    fmt.Sprintf("eth%d", i),
-					TxQLen:  -1,
-				},
-				PeerName: "ve_" + node.name,
-			}
-			err := addveth(ns, nslab, veth, func(peer netlink.Link) error {
-				mstr, err := netlink.LinkByName(iface.net.name)
-				if err != nil {
-					return fmt.Errorf("joining network %s: %w", iface.net.name, err)
-				}
-				return netlink.LinkSetMaster(peer, mstr)
-			})
-			if err != nil {
-				return fmt.Errorf("cannot joing network: %w", err)
-			}
-
-			if iface.addr.IsValid() {
-				addr, err := netlink.ParseAddr(netip.PrefixFrom(iface.addr.Addr(), iface.net.network.Bits()).String())
-				if err != nil {
-					return fmt.Errorf("invalid interface address %s: %w", iface.addr, err)
-				}
-				if err := netlink.AddrAdd(veth, addr); err != nil {
-					return fmt.Errorf("assigning address %s: %w", iface.addr, err)
-				}
-			}
-
-		}
-
-		VMS = append(VMS, RunningNode{node: node, donefunc: func() { netns.DeleteNamed(node.name) }})
-
-	}
-	msg <- ("<I>Assets namespaces started")
 
 	go func() {
 		term := make(chan Controller)

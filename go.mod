@@ -29,3 +29,5 @@ require (
 	golang.org/x/net v0.29.0 // indirect
 	golang.org/x/sync v0.8.0 // indirect
 )
+
+replace github.com/bradfitz/qemu-guest-kragent => github.com/romaindoumenc/qemu-guest-kragent v0.0.0-20241218162357-5041fb4c77e0

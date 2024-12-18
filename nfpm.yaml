@@ -5,7 +5,7 @@
 name: "labomatic"
 arch: "amd64"
 platform: "linux"
-version: "v0.5.2"
+version: "v0.5.3"
 section: "default"
 priority: "extra"
 maintainer: "Trout Software <devit@trout.software>"
@@ -14,6 +14,12 @@ description: |
 contents:
  - src: build/routeros.img
    dst: /usr/lib/labomatic/routeros.img
+
+ - src: build/initfs
+   dst: /usr/lib/labomatic/assets.initfs
+
+ - src: build/vmlinuz-cyos
+   dst: /usr/lib/labomatic/assets.vmlinuz
 
  - src: build/labd
    dst: /usr/lib/labomatic/labd

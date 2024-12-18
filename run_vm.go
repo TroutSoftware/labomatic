@@ -24,7 +24,8 @@ func RunVM(node *netnode, taps map[string]*os.File, runas user.User) (*exec.Cmd,
 	if base == "" {
 		switch node.typ {
 		default:
-			panic("unknown node type")
+			panic(fmt.Sprintf("unknown node type %d", node.typ))
+		case nodeAsset:
 		case nodeRouter:
 			base = MikrotikImage
 		case nodeSwitch:
@@ -50,22 +51,6 @@ func RunVM(node *netnode, taps map[string]*os.File, runas user.User) (*exec.Cmd,
 		return nil, fmt.Errorf("invalid user id %s: %w", runas.Uid, err)
 	}
 
-	vst := filepath.Join(TmpDir, node.name+".qcow2")
-	cmd := exec.Command("/usr/bin/qemu-img", "create",
-		"-f", "qcow2", "-F", "qcow2",
-		"-b", base,
-		vst)
-	cmd.SysProcAttr = &syscall.SysProcAttr{
-		Credential: &syscall.Credential{Uid: uint32(uid), Gid: uint32(gid)},
-	}
-	if _, err := cmd.Output(); err != nil {
-		var perr *exec.ExitError
-		if errors.As(err, &perr) {
-			os.Stderr.Write(perr.Stderr)
-		}
-		return nil, fmt.Errorf("creating disk: %w", err)
-	}
-
 	// TODO move to unix socket for guest agent
 	TelnetNum++
 	args := []string{
@@ -79,8 +64,32 @@ func RunVM(node *netnode, taps map[string]*os.File, runas user.User) (*exec.Cmd,
 		"-device", "virtio-serial",
 		"-device", fmt.Sprintf("virtserialport,chardev=ga0,name=%s", node.agent().Path()),
 		"-serial", fmt.Sprintf("pty"),
-		"-drive", fmt.Sprintf("format=qcow2,file=%s", vst),
 	}
+
+	if node.typ == nodeAsset {
+		args = append(args, "-kernel", "/usr/lib/labomatic/assets.vmlinuz",
+			"-initrd", "/usr/lib/labomatic/assets.initfs",
+			"-append", "console=ttyS0")
+	} else {
+		vst := filepath.Join(TmpDir, node.name+".qcow2")
+		cmd := exec.Command("/usr/bin/qemu-img", "create",
+			"-f", "qcow2", "-F", "qcow2",
+			"-b", base,
+			vst)
+		cmd.SysProcAttr = &syscall.SysProcAttr{
+			Credential: &syscall.Credential{Uid: uint32(uid), Gid: uint32(gid)},
+		}
+		if _, err := cmd.Output(); err != nil {
+			var perr *exec.ExitError
+			if errors.As(err, &perr) {
+				os.Stderr.Write(perr.Stderr)
+			}
+			return nil, fmt.Errorf("creating disk: %w", err)
+		}
+
+		args = append(args, "-drive", fmt.Sprintf("format=qcow2,file=%s", vst))
+	}
+
 	if node.uefi {
 		args = append(args, "-drive", "if=pflash,format=raw,unit=0,readonly=on,file=/usr/share/ovmf/OVMF.fd")
 	}
@@ -196,7 +205,7 @@ waitUp:
 	if err != nil {
 		return fmt.Errorf("running provisioning script: %w", err)
 	}
-	slog.Debug("exec script returns", "pid", execresult.PID)
+	slog.Info("exec script returns", "pid", execresult.PID)
 
 	for range 10 {
 		var GuestExecStatus struct {
@@ -227,7 +236,7 @@ waitUp:
 			}
 			return fmt.Errorf("Error running script: %s", errdt)
 		}
-		slog.Debug("exec script did not terminate, continue")
+		slog.Info("exec script did not terminate, continue")
 		time.Sleep(2 * time.Second)
 	}
 	return fmt.Errorf("could not properly seed machine")
@@ -275,18 +284,20 @@ func (chr) defaultInit() string {
 
 type csw struct{}
 
-func (csw) Path() string { return "cyberos.provision_agent" }
+func (csw) Path() string { return "org.qemu.guest_agent.0" }
 func (csw) Execute(data []byte) any {
 	return struct {
-		Path    string `json:"path"`
-		Content string `json:"input-data"`
-	}{"<script>", string(data)}
+		Path          string   `json:"path"`
+		Args          []string `json:"args"`
+		InputData     []byte   `json:"input-data"`
+		CaptureOutput bool     `json:"capture-output"`
+	}{"/bin/sh", []string{"-c"}, data, true}
 }
 
 func (csw) defaultInit() string {
 	return `{{ range .Interfaces }}
 {{ if .Address.IsValid }}
-PUT netcfg /ip/address/add interface={{.Name}} address={{.Address}}/{{.Network.Bits}}
+ip addr add dev {{.Name}} {{.Address}}/{{.Network.Bits}}
 {{ end }}
 {{ end }}
 `
