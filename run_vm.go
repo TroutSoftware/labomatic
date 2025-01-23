@@ -87,7 +87,13 @@ func RunVM(node *netnode, taps map[string]*os.File, runas user.User) (*exec.Cmd,
 			return nil, fmt.Errorf("creating disk: %w", err)
 		}
 
-		args = append(args, "-drive", fmt.Sprintf("format=qcow2,file=%s", vst))
+		if node.typ == nodeSwitch {
+			args = append(args, "-drive", fmt.Sprintf("if=none,id=nvm,format=qcow2,file=%s", vst))
+			args = append(args, "-device", "nvme,serial=deadbeef,drive=nvm")
+		}
+		if node.typ == nodeRouter {
+			args = append(args, "-drive", fmt.Sprintf("format=qcow2,file=%s", vst))
+		}
 	}
 
 	if node.uefi {
